@@ -1,22 +1,36 @@
 """Typed application settings loaded from the environment."""
+import os
 from functools import lru_cache
+from pathlib import Path
 
+from dotenv import load_dotenv
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
     app_name: str = "Laundry Management System"
     environment: str = "development"
-    mongodb_uri: str = "mongodb://localhost:27017"
-    mongodb_db: str = "laundry"
+    mongodb_uri: str = Field(
+        default_factory=lambda: os.getenv(
+            "MONGODB_URL",
+            os.getenv("MONGODB_URI", "mongodb://localhost:27017/"),
+        ),
+        validation_alias=AliasChoices("MONGODB_URL", "MONGODB_URI"),
+    )
+    mongodb_db: str = Field(
+        default_factory=lambda: os.getenv("DB_NAME", os.getenv("MONGODB_DB", "laundryDB")),
+        validation_alias=AliasChoices("DB_NAME", "MONGODB_DB"),
+    )
     jwt_secret: str = "insecure-dev-secret-change-me"
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 480
 
     public_base_url: str = "http://localhost:5173"
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     bootstrap_admin_phone: str = "9999999999"
     bootstrap_admin_password: str = ""

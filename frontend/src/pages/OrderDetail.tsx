@@ -1,29 +1,54 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import { api, type OrderStatus } from '../lib/api';
+import { Link, useLocation, useParams } from 'react-router-dom';
+import { api, type OrderStatus, type ServiceCategory } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import { useApi } from '../lib/useApi';
 import { useI18n } from '../i18n';
-import { fromPaise, rupees, toPaise } from '../lib/money';
+import { fromPaise, rupees } from '../lib/money';
 import { StatusBadge } from '../components/StatusBadge';
 
-const NEXT: Record<OrderStatus, { status: OrderStatus; labelKey: 'markDone' | 'markReady' | 'markCollected' }[]> = {
+const NEXT: Record<OrderStatus, { status: OrderStatus; labelKey: 'markDone' | 'markReady' }[]> = {
   in_process: [
     { status: 'done', labelKey: 'markDone' },
     { status: 'ready', labelKey: 'markReady' },
   ],
   done: [{ status: 'ready', labelKey: 'markReady' }],
-  ready: [{ status: 'collected', labelKey: 'markCollected' }],
+  ready: [],
   collected: [],
+  delivered: [],
 };
+
+function parsePaymentPaise(value: string): number | null {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value);
+  if (!match) return null;
+  const amount = Number(match[1]) * 100 + Number((match[2] ?? '').padEnd(2, '0'));
+  return Number.isSafeInteger(amount) && amount > 0 ? amount : null;
+}
 
 export function OrderDetail() {
   const { id = '' } = useParams();
   const { t } = useI18n();
+  const { isAdmin } = useAuth();
+  const location = useLocation();
   const { data: order, error, loading, reload } = useApi(() => api.order(id), [id]);
   const [qr, setQr] = useState<{ data_url: string; url: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [paidInput, setPaidInput] = useState('');
+  const [showPendingPayment, setShowPendingPayment] = useState(false);
+  const routeState = location.state as {
+    returnTo?: { pathname?: string; search?: string; state?: unknown };
+  } | null;
+  const requestedReturn = routeState?.returnTo;
+  const returnPath =
+    requestedReturn?.pathname === '/reports' && isAdmin ? '/reports' : '/orders';
+  const returnTo = {
+    pathname: returnPath,
+    search: requestedReturn?.pathname === returnPath && requestedReturn.search?.startsWith('?')
+      ? requestedReturn.search
+      : '',
+    state: requestedReturn?.pathname === returnPath ? requestedReturn.state : undefined,
+  };
 
   async function changeStatus(status: OrderStatus) {
     setBusy(true);
@@ -39,14 +64,36 @@ export function OrderDetail() {
   }
 
   async function savePayment() {
+    const paymentPaise = parsePaymentPaise(paidInput);
+    if (paymentPaise === null) {
+      setActionError(t('paymentPositiveError'));
+      return;
+    }
+    if (order && paymentPaise > Math.max(0, order.total_paise - order.paid_paise)) {
+      setActionError(t('paymentExceedsBalanceError'));
+      return;
+    }
     setBusy(true);
     setActionError(null);
     try {
-      await api.setPayment(id, toPaise(paidInput));
+      await api.setPayment(id, paymentPaise);
       setPaidInput('');
       reload();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Could not update the payment');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deliverOrder() {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await api.deliverOrder(id);
+      reload();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not deliver the order');
     } finally {
       setBusy(false);
     }
@@ -65,9 +112,30 @@ export function OrderDetail() {
   if (error) return <div className="card text-sm text-red-700">{error}</div>;
   if (!order) return null;
 
+  const serviceLabels: Record<ServiceCategory, string> = {
+    dry_cleaning: t('dryCleaning'),
+    press: t('pressService'),
+    wash: t('washService'),
+  };
+  const pendingPaise = Math.max(0, order.total_paise - order.paid_paise);
+  const isDelivered = order.status === 'delivered' || order.status === 'collected';
+  const canDeliver = order.status === 'ready' && pendingPaise === 0 && order.paid_paise === order.total_paise;
+  const parsedPayment = parsePaymentPaise(paidInput);
+  const paymentInputError = paidInput
+    ? parsedPayment === null
+      ? t('paymentPositiveError')
+      : parsedPayment > pendingPaise
+        ? t('paymentExceedsBalanceError')
+        : ''
+    : '';
+
   return (
     <div className="space-y-4">
-      <Link to="/orders" className="text-sm text-brand-700">
+      <Link
+        to={returnTo}
+        state={requestedReturn?.pathname === returnPath ? requestedReturn.state : undefined}
+        className="text-sm text-brand-700"
+      >
         ← {t('back')}
       </Link>
 
@@ -82,6 +150,35 @@ export function OrderDetail() {
         <p className="mt-2 font-medium">{order.customer_name}</p>
         <p className="text-sm text-slate-600">{order.customer_phone}</p>
         {order.customer_address && <p className="text-sm text-slate-500">{order.customer_address}</p>}
+        {order.service_categories && order.service_categories.length > 0 && (
+          <div className="mt-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('serviceCategory')}</p>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {order.service_categories.map((service) => (
+                <span key={service} className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-800">
+                  {serviceLabels[service]}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {order.rack_number !== undefined && (
+          <p className="mt-2 text-sm text-slate-600">
+            <span aria-hidden="true">🗄️ </span>{t('rackNumber')}: Rack {order.rack_number}
+          </p>
+        )}
+        <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 text-sm sm:grid-cols-2">
+          <p>
+            <span className="text-slate-500">{t('deliveryStatus')}: </span>
+            <span className="font-medium">{isDelivered ? t('delivered') : order.status === 'ready' ? t('awaitingDelivery') : t('notReadyForDelivery')}</span>
+          </p>
+          <p>
+            <span className="text-slate-500">{t('paymentStatus')}: </span>
+            <span className={`font-medium ${pendingPaise > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+              {pendingPaise > 0 ? t('pendingPayment') : t('paidInFull')}
+            </span>
+          </p>
+        </div>
       </div>
 
       <div className="card">
@@ -127,8 +224,8 @@ export function OrderDetail() {
             <dd>{rupees(order.paid_paise)}</dd>
           </div>
           <div className="flex justify-between font-semibold text-red-600">
-            <dt>{t('balance')}</dt>
-            <dd>{rupees(order.balance_paise)}</dd>
+            <dt>{t('pendingPayment')}</dt>
+            <dd>{rupees(pendingPaise)}</dd>
           </div>
         </dl>
       </div>
@@ -147,6 +244,22 @@ export function OrderDetail() {
             {t(action.labelKey)}
           </button>
         ))}
+        <button
+          type="button"
+          className="btn-ghost"
+          aria-expanded={showPendingPayment}
+          onClick={() => setShowPendingPayment((visible) => !visible)}
+        >
+          {t('pendingPayment')}
+        </button>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={busy || !canDeliver}
+          onClick={deliverOrder}
+        >
+          {t('deliverToCustomer')}
+        </button>
         <button type="button" className="btn-ghost" onClick={showQr}>
           {t('showQr')}
         </button>
@@ -154,6 +267,30 @@ export function OrderDetail() {
           {t('printBill')}
         </Link>
       </div>
+
+      {showPendingPayment && (
+        <div className="card space-y-2 text-sm" aria-live="polite">
+          <div className="flex justify-between">
+            <span className="text-slate-600">{t('totalAmount')}</span>
+            <span className="font-medium">{rupees(order.total_paise)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-600">{t('paidAmount')}</span>
+            <span className="font-medium">{rupees(order.paid_paise)}</span>
+          </div>
+          <div className="flex justify-between font-semibold text-red-600">
+            <span>{t('pendingPayment')}</span>
+            <span>{rupees(pendingPaise)}</span>
+          </div>
+        </div>
+      )}
+
+      {pendingPaise > 0 && !isDelivered && (
+        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">{t('completePaymentBeforeDelivery')}</p>
+      )}
+      {order.status !== 'ready' && !isDelivered && (
+        <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">{t('readyBeforeDelivery')}</p>
+      )}
 
       {order.status === 'ready' && (
         <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800">{t('whatsappOnReady')}</p>
@@ -171,7 +308,7 @@ export function OrderDetail() {
         </div>
       )}
 
-      {order.balance_paise > 0 && (
+      {pendingPaise > 0 && !isDelivered && (
         <div className="card space-y-2">
           <label className="label" htmlFor="paidnow">{t('paidNow')}</label>
           <div className="flex gap-2">
@@ -179,14 +316,15 @@ export function OrderDetail() {
               id="paidnow"
               className="field"
               inputMode="decimal"
-              placeholder={fromPaise(order.balance_paise)}
+              placeholder={fromPaise(pendingPaise)}
               value={paidInput}
               onChange={(e) => setPaidInput(e.target.value)}
             />
-            <button type="button" className="btn-primary px-4" onClick={savePayment} disabled={busy || !paidInput}>
+            <button type="button" className="btn-primary px-4" onClick={savePayment} disabled={busy || !paidInput || Boolean(paymentInputError)}>
               {t('savePayment')}
             </button>
           </div>
+          {paymentInputError && <p className="text-xs font-medium text-red-600">{paymentInputError}</p>}
         </div>
       )}
 

@@ -1,60 +1,93 @@
 # Laundry Management System
 
-A mobile-friendly laundry app for managing customers, orders, bills, order status,
-QR lookups, staff, and reports. The deployed frontend is a browser-only demo:
-application data and accounts stay in that browser's local storage. It does not
-connect to a database or backend service.
+A React/Vite frontend with an existing FastAPI backend for customers, orders,
+bills, QR lookups, staff management, payments, and reports. The backend stores
+application data in MongoDB; it connects to the local `laundryDB` database by
+default.
 
-## Run locally
+## Local development with MongoDB
 
-```bash
-cd frontend
-npm ci
-npm run dev
-```
+1. Start MongoDB Community Server. In MongoDB Compass, connect to:
+   `mongodb://localhost:27017/`
+2. Configure and run the FastAPI backend in PowerShell:
 
-Or build and run the static site with Docker:
+   ```powershell
+   if (!(Test-Path backend\.env)) { Copy-Item backend\.env.example backend\.env }
+   cd backend
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   uvicorn app.main:app --reload
+   ```
 
-```bash
-docker compose up --build
-```
+   Use Python 3.12 for the pinned backend dependencies. The backend loads
+   `backend\.env` with `python-dotenv`; its MongoDB settings use
+   `MONGODB_URL` and `DB_NAME=laundryDB`. Set a private random
+   `JWT_SECRET` in `backend\.env`. If `BOOTSTRAP_ADMIN_PASSWORD` is left blank,
+   and there is no existing Main Admin, login remains unavailable. Set a private
+   `BOOTSTRAP_ADMIN_PASSWORD` and restart FastAPI to create the initial Main
+   Admin, then sign in with `BOOTSTRAP_ADMIN_PHONE`. The login page does not
+   expose public registration. A first-admin-only registration endpoint remains
+   available for controlled initial setup.
+3. In a second PowerShell window, configure and run the frontend:
 
-Open the local Vite or Docker URL and create a demo account from the sign-in
-screen. No environment variables, API server, or database are required.
+   ```powershell
+   if (!(Test-Path frontend\.env)) { Copy-Item frontend\.env.example frontend\.env }
+   cd frontend
+   npm ci
+   npm run dev
+   ```
 
-## Demo behavior and security
+   Open the Vite URL (normally `http://127.0.0.1:5173`). The frontend calls the
+   backend at `http://127.0.0.1:8000`; `/api/health` and `/api/db-test` report
+   whether MongoDB is reachable.
+4. In Compass, open `laundryDB`. The app uses `users`, `orders`, and `payment`.
+   The existing customer directory and backend services also use `customers`,
+   `counters`, and `whatsapp_outbox`. The backend creates indexes on startup.
 
-- Register with a name, email, and password. Sign in with that email, or with a
-  phone number for a sub-admin account created on the Staff page.
-- Demo users, orders, customers, reports, and staff are saved in browser local
-  storage and survive refreshes in that browser.
-- Passwords are stored only as salted hashes, never as plaintext. Do not use
-  real passwords or sensitive customer information: browser storage and
-  client-side authentication are not secure production authentication.
-- Each new registration is an admin account. Admins can create demo sub-admins
-  from the Staff page.
-- QR lookup works in the browser that holds the demo data. Another browser or
-  device has a separate local store and cannot look up that order.
-- This offline demo does not send WhatsApp messages or synchronize data between
-  users or devices.
+The backend reuses its existing asynchronous Motor client, backed by the
+PyMongo driver, to avoid blocking FastAPI request handling. Both `pymongo` and
+`python-dotenv` are backend dependencies. `.env` files are ignored by Git. Never put MongoDB credentials,
+JWT secrets, or payment credentials in frontend environment variables.
 
-Clearing this site's browser storage removes demo accounts and application
-data. Register a new account to start over.
+## Accounts and access
 
-## Deploy to Vercel
+- The Main Admin is provisioned at first startup or through the restricted
+  first-admin endpoint. Sub Admin accounts can only be created by an
+  authenticated Main Admin from **Sub Admin Management**.
+- Sub Admins sign in using their Sub Admin ID and password. Passwords are
+  hashed by the backend. Main Admin-only APIs (reports and account management)
+  also enforce role checks server-side.
+- Deactivating a Sub Admin is checked against MongoDB on every authenticated
+  request, so existing tokens stop authorizing requests immediately. Activating
+  the account again restores access without changing its password.
+- Staff-recorded cash/UPI/card entries are stored in the `payment` collection
+  with a `recorded` status. This app has no payment-provider integration and
+  never labels entries `successful` or claims to verify online transactions.
+- Existing demo data in browser local storage is not automatically imported to
+  MongoDB. Existing MongoDB documents remain in place; older orders without
+  service/rack fields remain readable.
 
-Import the repository with its root directory set to the repository root.
-The root `vercel.json` builds the Vite app from `frontend/`, serves
-`frontend/dist`, and rewrites client-side routes to the app entry point. No
-Vercel environment variables, backend, or database setup is required.
+## Deployment limitation
+
+`mongodb://localhost:27017/` is for local development only. A frontend hosted
+on Vercel cannot connect to MongoDB running on the developer's computer. For a
+deployed app, host the FastAPI backend and MongoDB on reachable infrastructure,
+configure backend CORS and secrets there, and set the frontend build variable
+`VITE_API_BASE_URL` to the backend's public HTTPS URL. Do not expose a database
+URI or database credentials to the browser. The existing Vercel static
+configuration deploys only the frontend; it does not deploy this FastAPI
+backend or provide access to local MongoDB.
 
 ## Validation
 
-```bash
+```powershell
 cd frontend
 npm run typecheck
 npm run build
-```
 
-The `backend/` directory contains the previous FastAPI implementation and is
-not used or deployed by this browser-only demo.
+cd ..\backend
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+py -3.12 -m pytest
+```

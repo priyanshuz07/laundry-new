@@ -6,7 +6,7 @@ interface AuthValue {
   isAdmin: boolean;
   ready: boolean;
   login: (identifier: string, password: string) => Promise<void>;
-  register: (name: string, email: string, password: string) => Promise<void>;
+  register: (name: string, email: string, phone: string, password: string) => Promise<void>;
   logout: () => void;
 }
 
@@ -31,7 +31,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    setReady(true);
+    let active = true;
+    const handleExpiredSession = () => {
+      demoAuth.clearSession();
+      setSession(null);
+    };
+    window.addEventListener('lms:session-expired', handleExpiredSession);
+    const stored = demoAuth.readSession();
+    if (!stored) {
+      setReady(true);
+      return () => {
+        active = false;
+        window.removeEventListener('lms:session-expired', handleExpiredSession);
+      };
+    }
+
+    demoAuth
+      .me()
+      .then((current) => {
+        if (active) {
+          demoAuth.saveSession(current);
+          setSession(current);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        if (error instanceof Error && 'status' in error && [401, 403].includes(Number(error.status))) {
+          demoAuth.clearSession();
+          setSession(null);
+        }
+      })
+      .finally(() => {
+        if (active) setReady(true);
+      });
+
+    return () => {
+      active = false;
+      window.removeEventListener('lms:session-expired', handleExpiredSession);
+    };
   }, []);
 
   const login = useCallback(async (identifier: string, password: string) => {
@@ -40,8 +77,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSession(next);
   }, []);
 
-  const register = useCallback(async (name: string, email: string, password: string) => {
-    const next = await demoAuth.register(name, email, password);
+  const register = useCallback(async (name: string, email: string, phone: string, password: string) => {
+    const next = await demoAuth.register(name, email, phone, password);
     demoAuth.saveSession(next);
     setSession(next);
   }, []);

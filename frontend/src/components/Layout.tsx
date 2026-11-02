@@ -15,7 +15,7 @@ export function Layout() {
     ...(isAdmin
       ? [
           { to: '/reports', label: t('reports') },
-          { to: '/staff', label: t('staff') },
+          { to: '/staff', label: t('subAdminManagement') },
         ]
       : []),
   ];
@@ -33,7 +33,9 @@ export function Layout() {
             <span className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-brand-600 to-brand-500 text-xl text-white shadow-lg shadow-brand-600/25">🧺</span>
             <div className="min-w-0">
               <p className="truncate text-sm font-black uppercase tracking-[0.18em] text-slate-900">{t('appName')}</p>
-              <p className="truncate text-xs text-slate-500">{session?.name}</p>
+              <p className="truncate text-xs text-slate-500">
+                {session?.name} · {session?.role === 'admin' ? t('mainAdmin') : t('subAdminRole')}
+              </p>
             </div>
           </div>
           <nav className="ml-auto hidden items-center gap-2 md:flex">

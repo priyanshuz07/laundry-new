@@ -1,8 +1,3 @@
-import QRCode from 'qrcode';
-
-const STORAGE_KEY = 'lms.demo.data';
-const SESSION_KEY = 'lms.demo.session';
-
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -13,7 +8,8 @@ export class ApiError extends Error {
 }
 
 export type Role = 'admin' | 'subadmin';
-export type OrderStatus = 'in_process' | 'done' | 'ready' | 'collected';
+export type OrderStatus = 'in_process' | 'done' | 'ready' | 'collected' | 'delivered';
+export type ServiceCategory = 'dry_cleaning' | 'press' | 'wash';
 
 export interface OrderItem {
   name: string;
@@ -32,6 +28,8 @@ export interface Order {
   customer_name: string;
   customer_phone: string;
   customer_address: string;
+  service_categories: ServiceCategory[];
+  rack_number?: number;
   items: OrderItem[];
   subtotal_paise: number;
   discount_paise: number;
@@ -44,6 +42,7 @@ export interface Order {
   created_at: string | null;
   ready_at: string | null;
   collected_at: string | null;
+  delivered_at?: string | null;
   created_by_name: string;
 }
 
@@ -60,8 +59,9 @@ export interface Customer {
 export interface StaffUser {
   id: string;
   name: string;
-  phone: string;
-  email?: string;
+  phone?: string | null;
+  email?: string | null;
+  username?: string | null;
   role: Role;
   is_active: boolean;
   created_at: string | null;
@@ -74,475 +74,257 @@ export interface ReportBucket {
   collected_paise: number;
 }
 
-interface StoredUser extends StaffUser {
-  password_salt: string;
-  password_hash: string;
-}
-
-interface Store {
-  users: StoredUser[];
-  customers: Customer[];
-  orders: Order[];
-}
-
 export interface DemoSession {
   userId: string;
   name: string;
   role: Role;
+  accessToken: string;
 }
 
-const emptyStore = (): Store => ({ users: [], customers: [], orders: [] });
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
+const SESSION_KEY = 'lms.api.session';
+const AUTH_EXPIRED_EVENT = 'lms:session-expired';
+let accessToken: string | null = null;
 
-function readStore(): Store {
+function savedSession(): DemoSession | null {
+  const raw = localStorage.getItem(SESSION_KEY);
+  if (!raw) return null;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return emptyStore();
-    const store: unknown = JSON.parse(raw);
+    const value = JSON.parse(raw) as Partial<DemoSession>;
     if (
-      typeof store !== 'object' ||
-      store === null ||
-      !Array.isArray((store as Store).users) ||
-      !Array.isArray((store as Store).customers) ||
-      !Array.isArray((store as Store).orders)
+      typeof value.userId === 'string' &&
+      typeof value.name === 'string' &&
+      (value.role === 'admin' || value.role === 'subadmin') &&
+      typeof value.accessToken === 'string'
     ) {
-      throw new Error('Saved demo data is invalid. Clear this site’s local storage to restart.');
+      accessToken = value.accessToken;
+      return value as DemoSession;
     }
-    return store as Store;
+    return null;
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      throw new Error('Saved demo data could not be read. Clear this site’s local storage to restart.');
-    }
+    if (error instanceof SyntaxError) return null;
     throw error;
   }
 }
 
-function writeStore(store: Store): void {
+function errorMessage(payload: unknown, fallback: string): string {
+  if (typeof payload !== 'object' || payload === null || !('detail' in payload)) return fallback;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item !== 'object' || item === null || !('msg' in item)) return '';
+        return String((item as { msg: unknown }).msg);
+      })
+      .filter(Boolean)
+      .join('. ') || fallback;
+  }
+  return fallback;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body !== undefined) headers.set('Content-Type', 'application/json');
+  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
+  let response: Response;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'QuotaExceededError') {
-      throw new Error('Browser storage is full. Remove some saved demo data and try again.');
+    if (error instanceof TypeError) {
+      throw new ApiError(0, 'Could not connect to the API. Start the FastAPI server and check its URL.');
     }
     throw error;
   }
+
+  if (response.status === 204) return undefined as T;
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = errorMessage(payload, `Request failed (${response.status})`);
+    if (response.status === 401 || (response.status === 403 && message === 'Account is deactivated')) {
+      accessToken = null;
+      localStorage.removeItem(SESSION_KEY);
+      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+    }
+    throw new ApiError(response.status, message);
+  }
+  return payload as T;
 }
 
-function id(): string {
-  return crypto.randomUUID();
-}
-
-function encode(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-async function hashPassword(password: string, salt: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits'],
-  );
-  const hash = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      hash: 'SHA-256',
-      salt: new TextEncoder().encode(salt),
-      iterations: 120_000,
-    },
-    key,
-    256,
-  );
-  return encode(new Uint8Array(hash));
-}
-
-async function makeStoredUser(input: {
+function sessionFromResponse(value: {
+  access_token: string;
+  user_id: string;
   name: string;
-  email?: string;
-  phone?: string;
-  password: string;
   role: Role;
-}): Promise<StoredUser> {
-  const salt = encode(crypto.getRandomValues(new Uint8Array(16)));
+}): DemoSession {
   return {
-    id: id(),
-    name: input.name.trim(),
-    email: input.email?.trim().toLowerCase(),
-    phone: input.phone ?? '',
-    role: input.role,
-    is_active: true,
-    created_at: new Date().toISOString(),
-    password_salt: salt,
-    password_hash: await hashPassword(input.password, salt),
+    userId: value.user_id,
+    name: value.name,
+    role: value.role,
+    accessToken: value.access_token,
   };
-}
-
-function publicUser(user: StoredUser): StaffUser {
-  return {
-    id: user.id,
-    name: user.name,
-    phone: user.phone,
-    email: user.email,
-    role: user.role,
-    is_active: user.is_active,
-    created_at: user.created_at,
-  };
-}
-
-function requireOrder(store: Store, orderId: string): Order {
-  const order = store.orders.find((candidate) => candidate.id === orderId);
-  if (!order) throw new ApiError(404, 'Order not found');
-  return order;
-}
-
-const CATALOGUE = [
-  { key: 'shirt', label: { en: 'Shirt', mr: 'शर्ट', hi: 'शर्ट' }, price_paise: 2000 },
-  { key: 'pant', label: { en: 'Trouser', mr: 'पँट', hi: 'पैंट' }, price_paise: 3000 },
-  { key: 'saree', label: { en: 'Saree', mr: 'साडी', hi: 'साड़ी' }, price_paise: 7000 },
-  { key: 'kurta', label: { en: 'Kurta', mr: 'कुर्ता', hi: 'कुर्ता' }, price_paise: 2500 },
-  { key: 'bedsheet', label: { en: 'Bedsheet', mr: 'चादर', hi: 'चादर' }, price_paise: 5000 },
-  { key: 'blanket', label: { en: 'Blanket', mr: 'पांघरूण', hi: 'कंबल' }, price_paise: 12000 },
-  { key: 'jacket', label: { en: 'Jacket', mr: 'जॅकेट', hi: 'जैकेट' }, price_paise: 8000 },
-  { key: 'custom', label: { en: 'Custom item', mr: 'इतर वस्तू', hi: 'अन्य वस्तु' }, price_paise: 0 },
-];
-
-const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  in_process: ['done', 'ready'],
-  done: ['ready'],
-  ready: ['collected'],
-  collected: [],
-};
-
-function reportPeriod(date: Date, granularity: 'day' | 'week' | 'month'): string {
-  const start = new Date(date);
-  if (granularity === 'week') {
-    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
-  } else if (granularity === 'month') {
-    start.setDate(1);
-  }
-  start.setHours(0, 0, 0, 0);
-  return start.toISOString();
-}
-
-async function makeReport(granularity: 'day' | 'week' | 'month', days: number) {
-  const store = readStore();
-  const end = new Date();
-  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
-  const grouped = new Map<string, ReportBucket>();
-  for (const order of store.orders) {
-    if (!order.created_at) continue;
-    const created = new Date(order.created_at);
-    if (created < start || created > end) continue;
-    const period = reportPeriod(created, granularity);
-    const bucket = grouped.get(period) ?? {
-      period,
-      order_count: 0,
-      revenue_paise: 0,
-      collected_paise: 0,
-    };
-    bucket.order_count += 1;
-    bucket.revenue_paise += order.total_paise;
-    bucket.collected_paise += order.paid_paise;
-    grouped.set(period, bucket);
-  }
-  const buckets = [...grouped.values()].sort((a, b) => a.period.localeCompare(b.period));
-  const totals = buckets.reduce(
-    (total, bucket) => ({
-      period: '',
-      order_count: total.order_count + bucket.order_count,
-      revenue_paise: total.revenue_paise + bucket.revenue_paise,
-      collected_paise: total.collected_paise + bucket.collected_paise,
-    }),
-    { period: '', order_count: 0, revenue_paise: 0, collected_paise: 0 },
-  );
-  return { granularity, start: start.toISOString(), end: end.toISOString(), buckets, totals };
 }
 
 export const demoAuth = {
-  async register(name: string, email: string, password: string): Promise<DemoSession> {
-    if (name.trim().length < 2) throw new ApiError(400, 'Enter your name');
-    const normalizedEmail = email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-      throw new ApiError(400, 'Enter a valid email address');
-    }
-    if (password.length < 8) throw new ApiError(400, 'Password must be at least 8 characters');
-
-    const store = readStore();
-    if (store.users.some((user) => user.email === normalizedEmail)) {
-      throw new ApiError(409, 'An account with this email already exists');
-    }
-    const user = await makeStoredUser({
-      name,
-      email: normalizedEmail,
-      password,
-      role: 'admin',
+  async register(name: string, email: string, phone: string, password: string): Promise<DemoSession> {
+    const result = await request<{
+      access_token: string;
+      user_id: string;
+      name: string;
+      role: Role;
+    }>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ name, email, phone, password }),
     });
-    store.users.push(user);
-    writeStore(store);
-    return { userId: user.id, name: user.name, role: user.role };
+    const session = sessionFromResponse(result);
+    accessToken = session.accessToken;
+    return session;
   },
 
   async login(identifier: string, password: string): Promise<DemoSession> {
-    const normalized = identifier.trim().toLowerCase();
-    const user = readStore().users.find(
-      (candidate) => candidate.email === normalized || candidate.phone === identifier.trim(),
-    );
-    if (!user || !user.is_active || (await hashPassword(password, user.password_salt)) !== user.password_hash) {
-      throw new ApiError(401, 'Incorrect email/phone or password');
-    }
-    return { userId: user.id, name: user.name, role: user.role };
+    const result = await request<{
+      access_token: string;
+      user_id: string;
+      name: string;
+      role: Role;
+    }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier, password }),
+    });
+    const session = sessionFromResponse(result);
+    accessToken = session.accessToken;
+    return session;
   },
 
-  me(userId: string): DemoSession | null {
-    const user = readStore().users.find((candidate) => candidate.id === userId && candidate.is_active);
-    return user ? { userId: user.id, name: user.name, role: user.role } : null;
+  async me(): Promise<DemoSession> {
+    const user = await request<{ id: string; name: string; role: Role }>('/api/auth/me');
+    const session = savedSession();
+    if (!session) throw new ApiError(401, 'Your session has expired. Please sign in again.');
+    return { ...session, userId: user.id, name: user.name, role: user.role };
   },
 
   saveSession(session: DemoSession): void {
+    accessToken = session.accessToken;
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
   },
 
   readSession(): DemoSession | null {
-    const raw = localStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    try {
-      const session = JSON.parse(raw) as DemoSession;
-      if (typeof session.userId !== 'string' || typeof session.name !== 'string') return null;
-      return this.me(session.userId);
-    } catch (error) {
-      if (error instanceof SyntaxError) return null;
-      throw error;
-    }
+    return savedSession();
   },
 
   clearSession(): void {
+    accessToken = null;
     localStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem('lms.demo.session');
   },
 };
 
 export const api = {
-  async orders(params: { status?: string; q?: string; page?: number }) {
-    const store = readStore();
-    const page = params.page ?? 1;
-    const pageSize = 20;
-    const term = (params.q ?? '').toLowerCase();
-    const filtered = store.orders
-      .filter((order) => !params.status || order.status === params.status)
-      .filter((order) =>
-        !term || [order.order_no, order.customer_name, order.customer_phone].some((value) => value.toLowerCase().includes(term)),
-      )
-      .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
-    return {
-      items: filtered.slice((page - 1) * pageSize, page * pageSize),
-      total: filtered.length,
-      page,
-      page_size: pageSize,
-    };
-  },
-
-  async order(orderId: string): Promise<Order> {
-    return requireOrder(readStore(), orderId);
-  },
-
-  async createOrder(body: unknown): Promise<Order> {
-    const input = body as {
-      customer: { name: string; phone: string; address?: string; notes?: string };
-      items: Omit<OrderItem, 'line_total_paise'>[];
-      discount_paise?: number;
-      paid_paise?: number;
-      payment_method?: string;
-      note?: string;
-    };
-    if (!input.customer?.name || !input.customer.phone || !input.items?.length) {
-      throw new ApiError(400, 'Customer details and at least one item are required');
-    }
-
-    const store = readStore();
-    const now = new Date();
-    let customer = store.customers.find((candidate) => candidate.phone === input.customer.phone);
-    if (!customer) {
-      customer = {
-        id: id(),
-        name: input.customer.name,
-        phone: input.customer.phone,
-        address: input.customer.address ?? '',
-        notes: input.customer.notes ?? '',
-        created_at: now.toISOString(),
-        order_count: 0,
-      };
-      store.customers.push(customer);
-    } else {
-      customer.name = input.customer.name;
-      customer.address = input.customer.address ?? '';
-    }
-
-    const items: OrderItem[] = input.items.map((item) => ({
-      ...item,
-      line_total_paise: item.quantity * item.unit_price_paise,
-    }));
-    const subtotal = items.reduce((sum, item) => sum + item.line_total_paise, 0);
-    const discount = Math.min(Math.max(0, input.discount_paise ?? 0), subtotal);
-    const total = subtotal - discount;
-    const orderPrefix = `LMS-${now.toISOString().slice(2, 7).replace('-', '')}-`;
-    const orderSequence =
-      store.orders.filter((candidate) => candidate.order_no.startsWith(orderPrefix)).length + 1;
-    const order: Order = {
-      id: id(),
-      order_no: `${orderPrefix}${String(orderSequence).padStart(4, '0')}`,
-      public_token: id(),
-      customer_id: customer.id,
-      customer_name: customer.name,
-      customer_phone: customer.phone,
-      customer_address: customer.address,
-      items,
-      subtotal_paise: subtotal,
-      discount_paise: discount,
-      total_paise: total,
-      paid_paise: Math.min(Math.max(0, input.paid_paise ?? 0), total),
-      balance_paise: Math.max(0, total - Math.min(Math.max(0, input.paid_paise ?? 0), total)),
-      payment_method: input.payment_method ?? 'cash',
-      status: 'in_process',
-      note: input.note ?? '',
-      created_at: now.toISOString(),
-      ready_at: null,
-      collected_at: null,
-      created_by_name: demoAuth.readSession()?.name ?? '',
-    };
-    store.orders.push(order);
-    customer.order_count = store.orders.filter((candidate) => candidate.customer_id === customer?.id).length;
-    writeStore(store);
-    return order;
-  },
-
-  async setStatus(orderId: string, status: OrderStatus): Promise<Order> {
-    const store = readStore();
-    const order = requireOrder(store, orderId);
-    if (order.status === status) return order;
-    if (!ALLOWED_TRANSITIONS[order.status].includes(status)) {
-      throw new ApiError(409, `Cannot change status from ${order.status} to ${status}`);
-    }
-    order.status = status;
-    if (status === 'ready') order.ready_at = new Date().toISOString();
-    if (status === 'collected') {
-      order.collected_at = new Date().toISOString();
-      order.paid_paise = order.total_paise;
-      order.balance_paise = 0;
-    }
-    writeStore(store);
-    return order;
-  },
-
-  async setPayment(orderId: string, paidPaise: number): Promise<Order> {
-    const store = readStore();
-    const order = requireOrder(store, orderId);
-    if (paidPaise < 0 || paidPaise > order.total_paise) throw new ApiError(400, 'Invalid payment amount');
-    order.paid_paise = paidPaise;
-    order.balance_paise = order.total_paise - paidPaise;
-    writeStore(store);
-    return order;
-  },
-
-  async qr(orderId: string) {
-    const order = requireOrder(readStore(), orderId);
-    const url = `${window.location.origin}/o/${order.public_token}`;
-    return { order_no: order.order_no, url, data_url: await QRCode.toDataURL(url) };
-  },
-
-  async catalogue() {
-    return { items: CATALOGUE };
-  },
-
-  async customers(query = ''): Promise<Customer[]> {
-    const store = readStore();
-    const term = query.toLowerCase();
-    return store.customers
-      .filter((customer) => !term || [customer.name, customer.phone].some((value) => value.toLowerCase().includes(term)))
-      .map((customer) => ({
-        ...customer,
-        order_count: store.orders.filter((order) => order.customer_id === customer.id).length,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  },
-
-  async saveCustomer(input: { name: string; phone: string; address: string; notes: string }): Promise<Customer> {
-    const store = readStore();
-    let customer = store.customers.find((candidate) => candidate.phone === input.phone);
-    if (customer) {
-      Object.assign(customer, input);
-    } else {
-      customer = {
-        ...input,
-        id: id(),
-        created_at: new Date().toISOString(),
-        order_count: 0,
-      };
-      store.customers.push(customer);
-    }
-    writeStore(store);
-    return customer;
-  },
-
-  async users(): Promise<StaffUser[]> {
-    return readStore().users.map(publicUser);
-  },
-
-  async createUser(input: { name: string; phone: string; password: string }): Promise<StaffUser> {
-    const store = readStore();
-    if (store.users.some((user) => user.phone === input.phone)) {
-      throw new ApiError(409, 'An account with this phone number already exists');
-    }
-    if (input.password.length < 8) throw new ApiError(400, 'Password must be at least 8 characters');
-    const user = await makeStoredUser({ ...input, role: 'subadmin' });
-    store.users.push(user);
-    writeStore(store);
-    return publicUser(user);
-  },
-
-  async setUserActive(userId: string, active: boolean): Promise<StaffUser> {
-    const store = readStore();
-    const user = store.users.find((candidate) => candidate.id === userId);
-    if (!user) throw new ApiError(404, 'User not found');
-    user.is_active = active;
-    writeStore(store);
-    return publicUser(user);
-  },
-
-  async report(granularity: 'day' | 'week' | 'month', days: number) {
-    return makeReport(granularity, days);
-  },
-
-  async dashboard() {
-    const orders = readStore().orders;
-    const today = new Date().toDateString();
-    const todayOrders = orders.filter(
-      (order) => order.created_at && new Date(order.created_at).toDateString() === today,
+  orders(params: { status?: string; q?: string; page?: number }) {
+    const query = new URLSearchParams();
+    if (params.status) query.set('status', params.status);
+    if (params.q) query.set('q', params.q);
+    if (params.page) query.set('page', String(params.page));
+    return request<{ items: Order[]; total: number; page: number; page_size: number }>(
+      `/api/orders?${query.toString()}`,
     );
-    const openOrders: Record<string, number> = {
-      in_process: 0,
-      done: 0,
-      ready: 0,
-      collected: 0,
-    };
-    for (const order of orders) openOrders[order.status] += 1;
-    return {
-      open_orders: openOrders,
-      today: {
-        orders: todayOrders.length,
-        revenue_paise: todayOrders.reduce((sum, order) => sum + order.total_paise, 0),
-        collected_paise: todayOrders.reduce((sum, order) => sum + order.paid_paise, 0),
-      },
-    };
   },
 
-  async publicOrder(token: string) {
-    const order = readStore().orders.find((candidate) => candidate.public_token === token);
-    if (!order) throw new ApiError(404, 'Order not found on this browser');
-    return {
-      order_no: order.order_no,
-      customer_name: order.customer_name,
-      status: order.status,
-      items: order.items.map(({ name, quality, quantity }) => ({ name, quality, quantity })),
-      total_quantity: order.items.reduce((sum, item) => sum + item.quantity, 0),
-    };
+  order(orderId: string): Promise<Order> {
+    return request(`/api/orders/${encodeURIComponent(orderId)}`);
+  },
+
+  createOrder(body: unknown): Promise<Order> {
+    return request('/api/orders', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  setStatus(orderId: string, status: OrderStatus): Promise<Order> {
+    return request(`/api/orders/${encodeURIComponent(orderId)}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
+  },
+
+  setPayment(
+    orderId: string,
+    amountPaise: number,
+    paymentMethod: 'cash' | 'upi' | 'card' = 'cash',
+  ): Promise<Order> {
+    return request(`/api/orders/${encodeURIComponent(orderId)}/payment`, {
+      method: 'PATCH',
+      body: JSON.stringify({ amount_paise: amountPaise, payment_method: paymentMethod }),
+    });
+  },
+
+  deliverOrder(orderId: string): Promise<Order> {
+    return request(`/api/orders/${encodeURIComponent(orderId)}/deliver`, { method: 'POST' });
+  },
+
+  qr(orderId: string): Promise<{ order_no: string; url: string; data_url: string }> {
+    return request(`/api/orders/${encodeURIComponent(orderId)}/qr`);
+  },
+
+  catalogue(): Promise<{
+    items: { key: string; label: Record<string, string>; price_paise: number }[];
+    qualities: string[];
+  }> {
+    return request('/api/orders/catalogue');
+  },
+
+  customers(query = ''): Promise<Customer[]> {
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    return request(`/api/customers?${params.toString()}`);
+  },
+
+  saveCustomer(input: { name: string; phone: string; address: string; notes: string }): Promise<Customer> {
+    return request('/api/customers', { method: 'POST', body: JSON.stringify(input) });
+  },
+
+  users(): Promise<StaffUser[]> {
+    return request('/api/users');
+  },
+
+  createUser(input: { name: string; username: string; phone?: string; password: string }): Promise<StaffUser> {
+    return request('/api/users', { method: 'POST', body: JSON.stringify(input) });
+  },
+
+  setUserActive(userId: string, active: boolean): Promise<StaffUser> {
+    const query = new URLSearchParams({ active: String(active) });
+    return request(`/api/users/${encodeURIComponent(userId)}/active?${query}`, { method: 'PATCH' });
+  },
+
+  report(granularity: 'day' | 'week' | 'month', days: number) {
+    const query = new URLSearchParams({ granularity, days: String(days) });
+    return request<{
+      granularity: 'day' | 'week' | 'month';
+      start: string;
+      end: string;
+      buckets: ReportBucket[];
+      totals: ReportBucket;
+    }>(`/api/reports/money?${query}`);
+  },
+
+  pendingPayments(): Promise<Order[]> {
+    return request('/api/orders/pending-payments');
+  },
+
+  dashboard() {
+    return request<{
+      open_orders: Record<string, number>;
+      today: { orders: number; revenue_paise: number; collected_paise: number };
+    }>('/api/reports/dashboard');
+  },
+
+  publicOrder(token: string): Promise<{
+    order_no: string;
+    customer_name: string;
+    status: OrderStatus;
+    service_categories: ServiceCategory[];
+    rack_number?: number;
+    items: { name: string; quality: string; quantity: number }[];
+    total_quantity: number;
+  }> {
+    return request(`/api/public/orders/${encodeURIComponent(token)}`);
   },
 };

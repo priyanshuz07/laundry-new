@@ -1,5 +1,5 @@
 import { useParams } from 'react-router-dom';
-import { api } from '../lib/api';
+import { api, type ServiceCategory } from '../lib/api';
 import { useApi } from '../lib/useApi';
 import { useI18n } from '../i18n';
 import { StatusBadge } from '../components/StatusBadge';
@@ -10,6 +10,11 @@ export function PublicOrder() {
   const { token = '' } = useParams();
   const { t } = useI18n();
   const { data, error, loading } = useApi(() => api.publicOrder(token), [token]);
+  const serviceLabelKeys: Record<ServiceCategory, 'dryCleaning' | 'pressService' | 'washService'> = {
+    dry_cleaning: 'dryCleaning',
+    press: 'pressService',
+    wash: 'washService',
+  };
 
   return (
     <div className="min-h-screen bg-slate-100 px-4 py-6">
@@ -42,6 +47,20 @@ export function PublicOrder() {
               <p className="text-xs uppercase text-slate-400">{t('customerName')}</p>
               <p className="text-lg font-semibold">{data.customer_name}</p>
             </div>
+
+            {data.service_categories.length > 0 && (
+              <div className="border-t border-dashed border-slate-300 pt-3">
+                <p className="text-xs uppercase text-slate-400">{t('serviceCategory')}</p>
+                <p className="mt-1 text-sm font-medium">
+                  {data.service_categories.map((service) => t(serviceLabelKeys[service])).join(', ')}
+                </p>
+              </div>
+            )}
+            {data.rack_number !== undefined && (
+              <p className="border-t border-dashed border-slate-300 pt-3 text-sm text-slate-600">
+                <span aria-hidden="true">🗄️ </span>{t('rackNumber')}: Rack {data.rack_number}
+              </p>
+            )}
 
             <div className="border-t border-dashed border-slate-300 pt-3">
               <p className="mb-2 text-xs uppercase text-slate-400">

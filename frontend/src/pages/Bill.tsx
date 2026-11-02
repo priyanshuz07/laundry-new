@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { useParams } from 'react-router-dom';
-import { api } from '../lib/api';
+import { useNavigate, useParams } from 'react-router-dom';
+import { api, type ServiceCategory } from '../lib/api';
 import { useApi } from '../lib/useApi';
 import { rupees } from '../lib/money';
 import { useI18n } from '../i18n';
@@ -8,6 +8,7 @@ import { useI18n } from '../i18n';
 /** Print-friendly receipt. A4/thermal agnostic: 80mm-safe single column. */
 export function Bill() {
   const { id = '' } = useParams();
+  const navigate = useNavigate();
   const { t } = useI18n();
   const { data: order, error, loading } = useApi(() => api.order(id), [id]);
 
@@ -20,13 +21,21 @@ export function Bill() {
   if (error) return <p className="p-6 text-center text-red-700">{error}</p>;
   if (!order) return null;
 
+  const serviceLabels: Record<ServiceCategory, string> = {
+    dry_cleaning: t('dryCleaning'),
+    press: t('pressService'),
+    wash: t('washService'),
+  };
+  const pendingPaise = Math.max(0, order.total_paise - order.paid_paise);
+  const delivered = order.status === 'delivered' || order.status === 'collected';
+
   return (
     <div className="mx-auto max-w-sm bg-white p-4 text-slate-900">
       <div className="no-print mb-4 flex gap-2">
         <button type="button" className="btn-primary flex-1" onClick={() => window.print()}>
           {t('printBill')}
         </button>
-        <button type="button" className="btn-ghost" onClick={() => window.close()}>
+        <button type="button" className="btn-ghost" onClick={() => navigate(`/orders/${id}`)}>
           {t('cancel')}
         </button>
       </div>
@@ -44,6 +53,11 @@ export function Bill() {
         <p>{t('customerName')}: {order.customer_name}</p>
         <p>{t('phone')}: {order.customer_phone}</p>
         {order.customer_address && <p className="text-xs">{order.customer_address}</p>}
+        {order.service_categories && order.service_categories.length > 0 && (
+          <p>{t('serviceCategory')}: {order.service_categories.map((service) => serviceLabels[service]).join(', ')}</p>
+        )}
+        {order.rack_number !== undefined && <p>{t('rackNumber')}: Rack {order.rack_number}</p>}
+        <p>{t('deliveryStatus')}: {delivered ? t('delivered') : order.status === 'ready' ? t('awaitingDelivery') : t('notReadyForDelivery')}</p>
       </div>
 
       <table className="w-full border-t border-dashed border-slate-400 text-sm">
@@ -83,13 +97,13 @@ export function Bill() {
           <dd>{rupees(order.total_paise)}</dd>
         </div>
         <div className="flex justify-between">
-          <dt>{t('collected')}</dt>
+          <dt>{t('paidAmount')}</dt>
           <dd>{rupees(order.paid_paise)}</dd>
         </div>
-        {order.balance_paise > 0 && (
+        {pendingPaise > 0 && (
           <div className="flex justify-between font-semibold">
-            <dt>{t('balance')}</dt>
-            <dd>{rupees(order.balance_paise)}</dd>
+            <dt>{t('pendingPayment')}</dt>
+            <dd>{rupees(pendingPaise)}</dd>
           </div>
         )}
       </dl>

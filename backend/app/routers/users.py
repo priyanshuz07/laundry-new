@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pymongo.errors import DuplicateKeyError
 
 from ..db import users
 from ..deps import require_admin
@@ -19,7 +20,9 @@ def _out(doc: dict) -> UserOut:
     return UserOut(
         id=str(doc["_id"]),
         name=doc["name"],
-        phone=doc["phone"],
+        phone=doc.get("phone"),
+        username=doc.get("username") or doc.get("phone"),
+        email=doc.get("email"),
         role=doc["role"],
         is_active=doc.get("is_active", False),
         created_at=doc.get("created_at"),
@@ -40,20 +43,28 @@ async def list_users(_: dict = Depends(require_admin)) -> list[UserOut]:
 
 
 @router.post("", response_model=UserOut, status_code=201)
-async def create_subadmin(body: UserCreateIn, _: dict = Depends(require_admin)) -> UserOut:
+async def create_subadmin(body: UserCreateIn, admin: dict = Depends(require_admin)) -> UserOut:
     now = datetime.now(timezone.utc)
-    if await users().find_one({"phone": body.phone}):
+    if await users().find_one({"username": body.username}):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This Sub Admin ID is already in use")
+    if body.phone and await users().find_one({"phone": body.phone}):
         raise HTTPException(status.HTTP_409_CONFLICT, "This phone number already has an account")
     doc = {
         "name": body.name.strip(),
-        "phone": body.phone,
+        "username": body.username,
         "password_hash": hash_password(body.password),
         "role": "subadmin",
         "is_active": True,
         "created_at": now,
         "updated_at": now,
+        "created_by": str(admin["_id"]),
     }
-    res = await users().insert_one(doc)
+    if body.phone:
+        doc["phone"] = body.phone
+    try:
+        res = await users().insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Sub Admin ID or phone number already exists")
     doc["_id"] = res.inserted_id
     return _out(doc)
 

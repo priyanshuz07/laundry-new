@@ -37,6 +37,8 @@ async def public_order(token: str, request: Request) -> dict:
         "order_no": doc["order_no"],
         "customer_name": doc["customer_name"],
         "status": doc["status"],
+        "service_categories": doc.get("service_categories", []),
+        "rack_number": doc.get("rack_number"),
         "items": items,
         "total_quantity": sum(i["quantity"] for i in items),
         "created_at": doc.get("created_at"),

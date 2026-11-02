@@ -87,6 +87,12 @@ async def list_customers(
     return [_out(d, counts.get(str(d["_id"]), 0)) for d in docs]
 
 
+@router.post("", response_model=CustomerOut, status_code=status.HTTP_201_CREATED)
+async def save_customer(body: CustomerIn, _: dict = Depends(require_staff)) -> CustomerOut:
+    doc = await upsert_customer(body)
+    return _out(doc, await orders().count_documents({"customer_id": str(doc["_id"])}))
+
+
 @router.get("/{customer_id}", response_model=CustomerOut)
 async def get_customer(customer_id: str, _: dict = Depends(require_staff)) -> CustomerOut:
     try:

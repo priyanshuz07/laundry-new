@@ -1,6 +1,6 @@
-import { useCallback, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { api, type ServiceCategory } from '../lib/api';
 import { fromPaise, rupees, toPaise } from '../lib/money';
 import { useI18n } from '../i18n';
 import { useApi } from '../lib/useApi';
@@ -10,11 +10,17 @@ interface Row {
   name: string;
   category: string;
   quality: 'normal' | 'premium' | 'delicate';
-  quantity: number;
+  quantity: string;
   priceRupees: string;
 }
 
 const QUALITIES = ['normal', 'premium', 'delicate'] as const;
+const SERVICE_OPTIONS: { value: ServiceCategory; labelKey: 'dryCleaning' | 'pressService' | 'washService'; icon: string }[] = [
+  { value: 'dry_cleaning', labelKey: 'dryCleaning', icon: '🧥' },
+  { value: 'press', labelKey: 'pressService', icon: '♨️' },
+  { value: 'wash', labelKey: 'washService', icon: '🫧' },
+];
+const RACK_OPTIONS = Array.from({ length: 10 }, (_, index) => index + 1);
 
 let rowSeq = 0;
 const newRow = (name = '', category = 'custom', price = ''): Row => ({
@@ -22,20 +28,41 @@ const newRow = (name = '', category = 'custom', price = ''): Row => ({
   name,
   category,
   quality: 'normal',
-  quantity: 1,
+  quantity: '1',
   priceRupees: price,
 });
+
+function parseQuantity(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const quantity = Number(value);
+  return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : null;
+}
+
+function parsePaidPaise(value: string): number | null {
+  if (value === '') return 0;
+  const match = /^(\d*)(?:\.(\d{0,2}))?$/.exec(value);
+  if (!match || !/\d/.test(value)) return null;
+  const whole = Number(match[1] || 0);
+  const fraction = Number((match[2] || '').padEnd(2, '0'));
+  const paise = whole * 100 + fraction;
+  return Number.isSafeInteger(paise) ? paise : null;
+}
 
 export function NewOrder() {
   const { t, lang } = useI18n();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
+  const [phoneTouched, setPhoneTouched] = useState(false);
   const [address, setAddress] = useState('');
-  const [rows, setRows] = useState<Row[]>([newRow()]);
+  const [serviceCategories, setServiceCategories] = useState<ServiceCategory[]>([]);
+  const [rackNumber, setRackNumber] = useState('');
+  const [rows, setRows] = useState<Row[]>([]);
   const [discount, setDiscount] = useState('');
   const [paid, setPaid] = useState('');
+  const [paidTouched, setPaidTouched] = useState(false);
   const [method, setMethod] = useState<'cash' | 'upi' | 'card' | 'unpaid'>('cash');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,28 +71,74 @@ export function NewOrder() {
   const { data: catalogueData } = useApi(() => api.catalogue(), []);
   const catalogue = catalogueData?.items ?? [];
 
-  const updateRow = useCallback((key: string, patch: Partial<Row>) => {
-    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  }, []);
-
-  const subtotal = rows.reduce((sum, r) => sum + r.quantity * toPaise(r.priceRupees), 0);
+  const subtotal = rows.reduce((sum, r) => sum + (parseQuantity(r.quantity) ?? 0) * toPaise(r.priceRupees), 0);
   const total = Math.max(0, subtotal - toPaise(discount));
+  const phoneError = (phoneTouched || phone.length > 0) && !/^\d{10}$/.test(phone) ? t('phoneDigitsError') : '';
+  const parsedPaid = parsePaidPaise(paid);
+  const paidError = paidTouched
+    ? parsedPaid === null
+      ? t('paidInvalidError')
+      : parsedPaid > total
+        ? t('paidExceedsTotalError')
+        : ''
+    : '';
+
+  function addCatalogueItem(item: (typeof catalogue)[number]) {
+    setRows((previous) => {
+      if (item.key !== 'custom') {
+        const existing = previous.find((row) => row.category === item.key);
+        if (existing) {
+          return previous.map((row) =>
+            row.key === existing.key
+              ? { ...row, quantity: String((parseQuantity(row.quantity) ?? 0) + 1) }
+              : row,
+          );
+        }
+      }
+
+      return [...previous, newRow(item.label[lang] ?? item.label.en, item.key, fromPaise(item.price_paise))];
+    });
+  }
+
+  function removeRow(key: string) {
+    setRows((previous) => {
+      const row = previous.find((item) => item.key === key);
+      const quantity = row ? parseQuantity(row.quantity) : null;
+      if (row && quantity !== null && quantity > 1) {
+        return previous.map((item) => (item.key === key ? { ...item, quantity: String(quantity - 1) } : item));
+      }
+      return previous.filter((item) => item.key !== key);
+    });
+  }
+
+  function toggleServiceCategory(category: ServiceCategory) {
+    setServiceCategories((previous) =>
+      previous.includes(category) ? previous.filter((item) => item !== category) : [...previous, category],
+    );
+  }
 
   async function submit() {
     setError(null);
-    if (!name.trim() || phone.trim().length < 10) {
+    setPhoneTouched(true);
+    setPaidTouched(true);
+    if (!name.trim()) {
       setError(t('requiredFields'));
       return;
     }
-    const items = rows
-      .filter((r) => r.name.trim() && r.quantity > 0)
-      .map((r) => ({
-        name: r.name.trim(),
-        category: r.category,
-        quality: r.quality,
-        quantity: r.quantity,
-        unit_price_paise: toPaise(r.priceRupees),
-      }));
+    if (!/^\d{10}$/.test(phone)) return;
+    if (parsedPaid === null || parsedPaid > total) return;
+    const namedRows = rows.filter((row) => row.name.trim());
+    if (namedRows.some((row) => parseQuantity(row.quantity) === null)) {
+      setError(t('requiredFields'));
+      return;
+    }
+    const items = namedRows.map((r) => ({
+      name: r.name.trim(),
+      category: r.category,
+      quality: r.quality,
+      quantity: Number(r.quantity),
+      unit_price_paise: toPaise(r.priceRupees),
+    }));
     if (items.length === 0) {
       setError(t('requiredFields'));
       return;
@@ -76,12 +149,22 @@ export function NewOrder() {
       const order = await api.createOrder({
         customer: { name: name.trim(), phone: phone.trim(), address: address.trim(), notes: '' },
         items,
+        service_categories: serviceCategories,
+        rack_number: rackNumber ? Number(rackNumber) : undefined,
         discount_paise: toPaise(discount),
-        paid_paise: toPaise(paid),
+        paid_paise: parsedPaid,
         payment_method: method,
         note: '',
       });
-      navigate(`/orders/${order.id}`, { replace: true });
+      navigate(`/orders/${order.id}`, {
+        replace: true,
+        state: {
+          returnTo: {
+            pathname: '/orders',
+            state: location.state,
+          },
+        },
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create the order');
     } finally {
@@ -119,15 +202,74 @@ export function NewOrder() {
                 className="field"
                 inputMode="numeric"
                 value={phone}
-                onChange={(e) => setPhone(e.target.value.replace(/[^0-9]/g, ''))}
-                maxLength={15}
+                onChange={(e) => setPhone(e.target.value.replace(/[^0-9]/g, '').slice(0, 10))}
+                onPaste={(e) => {
+                  const pasted = e.clipboardData.getData('text');
+                  const input = e.currentTarget;
+                  const start = input.selectionStart ?? phone.length;
+                  const end = input.selectionEnd ?? phone.length;
+                  const nextPhone = phone.slice(0, start) + pasted + phone.slice(end);
+                  if (!/^\d+$/.test(pasted) || nextPhone.length > 10) {
+                    e.preventDefault();
+                    setPhoneTouched(true);
+                  }
+                }}
+                onBlur={() => setPhoneTouched(true)}
+                maxLength={10}
                 autoComplete="tel"
+                aria-invalid={Boolean(phoneError)}
               />
               <p className="mt-1 text-xs text-slate-500">{t('customerExists')}</p>
+              {phoneError && <p className="mt-1 text-xs font-medium text-red-600">{phoneError}</p>}
             </div>
             <div>
               <label className="label" htmlFor="caddr">{t('address')}</label>
               <input id="caddr" className="field" value={address} onChange={(e) => setAddress(e.target.value)} />
+            </div>
+          </section>
+
+          <section className="card space-y-4">
+            <h2 className="text-sm font-bold uppercase tracking-[0.14em] text-slate-500">{t('serviceCategory')}</h2>
+            <div className="grid gap-2 sm:grid-cols-3">
+              {SERVICE_OPTIONS.map((service) => {
+                const selected = serviceCategories.includes(service.value);
+                return (
+                  <button
+                    key={service.value}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => toggleServiceCategory(service.value)}
+                    className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-3 text-left text-sm font-semibold transition ${
+                      selected
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-brand-200 hover:bg-brand-50'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="text-lg" aria-hidden="true">{service.icon}</span>
+                      {t(service.labelKey)}
+                    </span>
+                    {selected && <span aria-hidden="true" className="text-emerald-700">✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <div>
+              <label className="label" htmlFor="rackNumber">
+                <span aria-hidden="true" className="mr-1">🗄️</span>
+                {t('rackNumber')}
+              </label>
+              <select
+                id="rackNumber"
+                className="field"
+                value={rackNumber}
+                onChange={(e) => setRackNumber(e.target.value)}
+              >
+                <option value="">{t('selectRackNumber')}</option>
+                {RACK_OPTIONS.map((rack) => (
+                  <option key={rack} value={rack}>{`Rack ${rack}`}</option>
+                ))}
+              </select>
             </div>
           </section>
 
@@ -142,7 +284,7 @@ export function NewOrder() {
                 <button
                   key={c.key}
                   type="button"
-                  onClick={() => setRows((prev) => [...prev, newRow(c.label[lang] ?? c.label.en, c.key, fromPaise(c.price_paise))])}
+                  onClick={() => addCatalogueItem(c)}
                   className="rounded-full bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700 ring-1 ring-brand-100 transition hover:bg-brand-100"
                 >
                   + {c.label[lang] ?? c.label.en} · ₹{fromPaise(c.price_paise)}
@@ -159,7 +301,7 @@ export function NewOrder() {
                       <input
                         className="field"
                         value={row.name}
-                        onChange={(e) => updateRow(row.key, { name: e.target.value })}
+                        readOnly
                         placeholder={t('customItem')}
                       />
                     </div>
@@ -167,11 +309,26 @@ export function NewOrder() {
                       <label className="label">{t('quantity')}</label>
                       <input
                         className="field"
-                        type="number"
-                        min={1}
-                        max={500}
+                        type="text"
+                        inputMode="numeric"
                         value={row.quantity}
-                        onChange={(e) => updateRow(row.key, { quantity: Math.max(1, Number(e.target.value) || 1) })}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          if (/^\d*$/.test(value) && (value === '' || Number.isSafeInteger(Number(value)))) {
+                            setRows((previous) =>
+                              previous.map((item) => (item.key === row.key ? { ...item, quantity: value } : item)),
+                            );
+                          }
+                        }}
+                        onBlur={() =>
+                          setRows((previous) =>
+                            previous.map((item) =>
+                              item.key === row.key && parseQuantity(item.quantity) === null
+                                ? { ...item, quantity: '1' }
+                                : item,
+                            ),
+                          )
+                        }
                       />
                     </div>
                     <div>
@@ -180,7 +337,13 @@ export function NewOrder() {
                         className="field"
                         inputMode="decimal"
                         value={row.priceRupees}
-                        onChange={(e) => updateRow(row.key, { priceRupees: e.target.value })}
+                        onChange={(e) =>
+                          setRows((previous) =>
+                            previous.map((item) =>
+                              item.key === row.key ? { ...item, priceRupees: e.target.value } : item,
+                            ),
+                          )
+                        }
                       />
                     </div>
                     <div className="col-span-2">
@@ -188,23 +351,31 @@ export function NewOrder() {
                       <select
                         className="field"
                         value={row.quality}
-                        onChange={(e) => updateRow(row.key, { quality: e.target.value as Row['quality'] })}
+                        onChange={(e) =>
+                          setRows((previous) =>
+                            previous.map((item) =>
+                              item.key === row.key
+                                ? { ...item, quality: e.target.value as Row['quality'] }
+                                : item,
+                            ),
+                          )
+                        }
                       >
-                        {QUALITIES.map((q) => (
-                          <option key={q} value={q}>
-                            {t(`quality_${q}`)}
+                        {QUALITIES.map((quality) => (
+                          <option key={quality} value={quality}>
+                            {t(`quality_${quality}`)}
                           </option>
                         ))}
                       </select>
                     </div>
                     <div className="col-span-2 flex items-end justify-between gap-2">
                       <p className="text-sm font-semibold text-slate-700">
-                        {t('lineTotal')}: {rupees(row.quantity * toPaise(row.priceRupees))}
+                        {t('lineTotal')}: {rupees((parseQuantity(row.quantity) ?? 0) * toPaise(row.priceRupees))}
                       </p>
                       <button
                         type="button"
                         className="text-xs font-medium text-red-600 transition hover:text-red-700"
-                        onClick={() => setRows((prev) => (prev.length > 1 ? prev.filter((r) => r.key !== row.key) : prev))}
+                        onClick={() => removeRow(row.key)}
                       >
                         {t('remove')}
                       </button>
@@ -214,7 +385,7 @@ export function NewOrder() {
               ))}
             </div>
 
-            <button type="button" className="btn-ghost w-full" onClick={() => setRows((prev) => [...prev, newRow()])}>
+            <button type="button" className="btn-ghost w-full" onClick={() => setRows((previous) => [...previous, newRow()])}>
               + {t('addItem')}
             </button>
           </section>
@@ -233,7 +404,19 @@ export function NewOrder() {
               </div>
               <div>
                 <label className="label" htmlFor="paid">{t('paidNow')}</label>
-                <input id="paid" className="field" inputMode="decimal" value={paid} onChange={(e) => setPaid(e.target.value)} />
+                <input
+                  id="paid"
+                  className="field"
+                  inputMode="decimal"
+                  value={paid}
+                  onChange={(e) => {
+                    setPaid(e.target.value);
+                    setPaidTouched(true);
+                  }}
+                  onBlur={() => setPaidTouched(true)}
+                  aria-invalid={Boolean(paidError)}
+                />
+                {paidError && <p className="mt-1 text-xs font-medium text-red-600">{paidError}</p>}
               </div>
             </div>
             <div>
@@ -263,7 +446,12 @@ export function NewOrder() {
       {error && <p className="rounded-xl bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
 
       <div className="flex gap-2">
-        <button type="button" className="btn-ghost flex-1" onClick={() => navigate(-1)}>
+        <button
+          type="button"
+          className="btn-ghost flex-1"
+          disabled={busy}
+          onClick={() => navigate('/orders', { replace: true, state: location.state })}
+        >
           {t('cancel')}
         </button>
         <button type="button" className="btn-primary flex-1" onClick={submit} disabled={busy}>

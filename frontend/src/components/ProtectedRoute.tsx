@@ -9,7 +9,9 @@ export function ProtectedRoute({ children, adminOnly = false }: { children: Reac
   const { t } = useI18n();
 
   if (!ready) return <div className="p-8 text-center text-slate-500">{t('loading')}</div>;
-  if (!session) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  if (!session) {
+    return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}` }} />;
+  }
   if (adminOnly && !isAdmin) {
     return (
       <div className="mx-auto max-w-md p-6">

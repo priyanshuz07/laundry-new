@@ -1,19 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { api, type Order, type OrderStatus } from '../lib/api';
 import { useApi } from '../lib/useApi';
 import { useI18n } from '../i18n';
 import { rupees } from '../lib/money';
 import { StatusBadge } from '../components/StatusBadge';
 
-const FILTERS: (OrderStatus | 'all')[] = ['all', 'in_process', 'done', 'ready', 'collected'];
+const FILTERS: (OrderStatus | 'all')[] = ['all', 'in_process', 'done', 'ready', 'collected', 'delivered'];
 
 export function Orders() {
   const { t } = useI18n();
-  const [status, setStatus] = useState<OrderStatus | 'all'>('all');
-  const [term, setTerm] = useState('');
+  const location = useLocation();
+  const ordersState = (location.state as { ordersState?: { status?: OrderStatus | 'all'; term?: string; page?: number } } | null)?.ordersState;
+  const [status, setStatus] = useState<OrderStatus | 'all'>(ordersState?.status ?? 'all');
+  const [term, setTerm] = useState(ordersState?.term ?? '');
   const [debounced, setDebounced] = useState('');
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(ordersState?.page ?? 1);
 
   // Debounce so typing does not fire a request per keystroke.
   useEffect(() => {
@@ -35,7 +37,7 @@ export function Orders() {
   const metrics = data
     ? [
         { label: t('totalOrders'), value: String(data.total), tone: 'brand' },
-        { label: t('openOrders'), value: String(data.items.filter((o) => o.status !== 'collected').length), tone: 'blue' },
+        { label: t('openOrders'), value: String(data.items.filter((o) => o.status !== 'collected' && o.status !== 'delivered').length), tone: 'blue' },
         { label: t('balance'), value: rupees(data.items.reduce((sum, o) => sum + Math.max(0, o.balance_paise), 0)), tone: 'amber' },
       ]
     : [];
@@ -47,7 +49,11 @@ export function Orders() {
           <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-brand-700">Dashboard</p>
           <h1 className="page-title">{t('orders')}</h1>
         </div>
-        <Link to="/orders/new" className="btn-primary px-4 py-2.5 text-sm">
+        <Link
+          to="/orders/new"
+          state={{ ordersState: { status, term, page } }}
+          className="btn-primary px-4 py-2.5 text-sm"
+        >
           + {t('newOrder')}
         </Link>
       </div>
@@ -104,7 +110,17 @@ export function Orders() {
       <ul className="space-y-3">
         {data?.items.map((order: Order) => (
           <li key={order.id}>
-            <Link to={`/orders/${order.id}`} className="list-card hover:border-brand-200 hover:ring-1 hover:ring-brand-100">
+            <Link
+              to={`/orders/${order.id}`}
+              state={{
+                returnTo: {
+                  pathname: '/orders',
+                  search: location.search,
+                  state: { ordersState: { status, term, page } },
+                },
+              }}
+              className="list-card hover:border-brand-200 hover:ring-1 hover:ring-brand-100"
+            >
               <div className="flex min-w-0 flex-1 items-center gap-3">
                 <div className="grid h-11 w-11 place-items-center rounded-2xl bg-brand-50 text-lg text-brand-700 ring-1 ring-brand-100">
                   🧺

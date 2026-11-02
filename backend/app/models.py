@@ -1,28 +1,65 @@
 """API schemas. Request models are strict: they are the trust boundary."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Role = Literal["admin", "subadmin"]
-OrderStatus = Literal["in_process", "done", "ready", "collected"]
+OrderStatus = Literal["in_process", "done", "ready", "collected", "delivered"]
 Quality = Literal["normal", "premium", "delicate"]
+ServiceCategory = Literal["dry_cleaning", "press", "wash"]
 
 
 # --- auth ------------------------------------------------------------------
 class LoginIn(BaseModel):
-    phone: str = Field(min_length=10, max_length=15)
+    identifier: str | None = Field(default=None, min_length=3, max_length=254)
+    phone: str | None = Field(default=None, min_length=10, max_length=15)
     password: str = Field(min_length=6, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_identifier(self):
+        identifier = (self.identifier or self.phone or "").strip()
+        if not identifier:
+            raise ValueError("email or phone is required")
+        if "@" in identifier:
+            identifier = identifier.lower()
+        elif identifier.isdigit() or identifier.replace(" ", "").replace("-", "").isdigit():
+            digits = identifier.replace(" ", "").replace("-", "")
+            if not digits.isdigit() or not 10 <= len(digits) <= 15:
+                raise ValueError("phone must contain 10 to 15 digits")
+            identifier = digits
+        else:
+            identifier = identifier.strip().lower()
+            if not re.fullmatch(r"[a-z0-9._-]{3,32}", identifier):
+                raise ValueError("enter a valid username, email, or phone")
+        self.identifier = identifier
+        return self
+
+
+class RegisterIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    email: str = Field(min_length=3, max_length=254)
+    phone: str = Field(min_length=10, max_length=15)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("enter a valid email address")
+        return value
 
     @field_validator("phone")
     @classmethod
-    def digits_only(cls, v: str) -> str:
-        v = v.strip().replace(" ", "").replace("-", "")
-        if not v.isdigit():
+    def digits_only(cls, value: str) -> str:
+        value = value.strip().replace(" ", "").replace("-", "")
+        if not value.isdigit():
             raise ValueError("phone must contain digits only")
-        return v
+        return value
 
 
 class TokenOut(BaseModel):
@@ -36,7 +73,9 @@ class TokenOut(BaseModel):
 class UserOut(BaseModel):
     id: str
     name: str
-    phone: str
+    phone: str | None = None
+    email: str | None = None
+    username: str | None = None
     role: Role
     is_active: bool
     created_at: datetime | None = None
@@ -44,12 +83,23 @@ class UserOut(BaseModel):
 
 class UserCreateIn(BaseModel):
     name: str = Field(min_length=2, max_length=80)
-    phone: str = Field(min_length=10, max_length=15)
+    username: str = Field(min_length=3, max_length=32)
+    phone: str | None = Field(default=None, min_length=10, max_length=15)
     password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def valid_username(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[a-z0-9._-]{3,32}", value) or not re.search(r"[a-z]", value):
+            raise ValueError("username must be 3-32 characters and contain at least one letter")
+        return value
 
     @field_validator("phone")
     @classmethod
-    def digits_only(cls, v: str) -> str:
+    def digits_only(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
         v = v.strip().replace(" ", "").replace("-", "")
         if not v.isdigit():
             raise ValueError("phone must contain digits only")
@@ -63,7 +113,7 @@ class PasswordResetIn(BaseModel):
 # --- customers -------------------------------------------------------------
 class CustomerIn(BaseModel):
     name: str = Field(min_length=2, max_length=80)
-    phone: str = Field(min_length=10, max_length=15)
+    phone: str = Field(min_length=10, max_length=10)
     address: str = Field(default="", max_length=300)
     notes: str = Field(default="", max_length=300)
 
@@ -103,10 +153,18 @@ class OrderItemOut(OrderItemIn):
 class OrderCreateIn(BaseModel):
     customer: CustomerIn
     items: list[OrderItemIn] = Field(min_length=1, max_length=50)
+    service_categories: list[ServiceCategory] = Field(default_factory=list, max_length=3)
+    rack_number: int | None = Field(default=None, ge=1, le=100)
     discount_paise: int = Field(default=0, ge=0, le=10_000_000)
     paid_paise: int = Field(default=0, ge=0, le=10_000_000)
     payment_method: Literal["cash", "upi", "card", "unpaid"] = "cash"
     note: str = Field(default="", max_length=300)
+
+    @model_validator(mode="after")
+    def paid_amount_requires_method(self):
+        if self.paid_paise > 0 and self.payment_method == "unpaid":
+            raise ValueError("select a payment method for a paid amount")
+        return self
 
 
 class OrderStatusIn(BaseModel):
@@ -114,7 +172,8 @@ class OrderStatusIn(BaseModel):
 
 
 class PaymentIn(BaseModel):
-    paid_paise: int = Field(ge=0, le=10_000_000)
+    amount_paise: int = Field(gt=0, le=10_000_000)
+    payment_method: Literal["cash", "upi", "card"]
 
 
 class OrderOut(BaseModel):
@@ -125,6 +184,8 @@ class OrderOut(BaseModel):
     customer_name: str
     customer_phone: str
     customer_address: str = ""
+    service_categories: list[ServiceCategory] = Field(default_factory=list)
+    rack_number: int | None = None
     items: list[OrderItemOut]
     subtotal_paise: int
     discount_paise: int
@@ -137,6 +198,7 @@ class OrderOut(BaseModel):
     created_at: datetime | None = None
     ready_at: datetime | None = None
     collected_at: datetime | None = None
+    delivered_at: datetime | None = None
     created_by_name: str = ""
 
 
@@ -161,6 +223,8 @@ class PublicOrderOut(BaseModel):
     order_no: str
     customer_name: str
     status: OrderStatus
+    service_categories: list[ServiceCategory] = Field(default_factory=list)
+    rack_number: int | None = None
     items: list[dict]
     total_quantity: int
     created_at: datetime | None = None

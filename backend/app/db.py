@@ -52,6 +52,10 @@ def orders():
     return db()["orders"]
 
 
+def payments():
+    return db()["payment"]
+
+
 def counters():
     return db()["counters"]
 
@@ -66,9 +70,27 @@ async def ensure_indexes() -> None:
 
     Compounding order follows the ESR rule: Equality, Sort, Range.
     """
+    existing_user_indexes = await users().index_information()
+    phone_index = existing_user_indexes.get("uq_user_phone")
+    if phone_index and not phone_index.get("sparse", False):
+        await users().drop_index("uq_user_phone")
+
     await users().create_indexes(
         [
-            IndexModel([("phone", ASCENDING)], unique=True, name="uq_user_phone"),
+            IndexModel([("phone", ASCENDING)], unique=True, sparse=True, name="uq_user_phone"),
+            IndexModel([("username", ASCENDING)], unique=True, sparse=True, name="uq_user_username"),
+            IndexModel(
+                [("role", ASCENDING)],
+                unique=True,
+                partialFilterExpression={"role": "admin"},
+                name="uq_single_admin",
+            ),
+            IndexModel(
+                [("email", ASCENDING)],
+                unique=True,
+                sparse=True,
+                name="uq_user_email",
+            ),
             IndexModel([("role", ASCENDING), ("is_active", ASCENDING)], name="ix_user_role_active"),
         ]
     )
@@ -94,6 +116,12 @@ async def ensure_indexes() -> None:
                 [("status", ASCENDING), ("whatsapp.reminder_sent_at", ASCENDING), ("ready_at", ASCENDING)],
                 name="ix_order_reminder",
             ),
+        ]
+    )
+    await payments().create_indexes(
+        [
+            IndexModel([("payment_id", ASCENDING)], unique=True, name="uq_payment_id"),
+            IndexModel([("order_id", ASCENDING), ("payment_date", DESCENDING)], name="ix_payment_order_date"),
         ]
     )
     await outbox().create_indexes(

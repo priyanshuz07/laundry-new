@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
-from ..db import counters, orders
+from ..db import counters, orders, payments
 from ..deps import require_staff
 from ..models import (
     OrderCreateIn,
@@ -31,6 +33,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "done": {"ready"},
     "ready": {"collected"},
     "collected": set(),
+    "delivered": set(),
 }
 
 CATALOGUE = [
@@ -61,18 +64,21 @@ def _order_out(doc: dict) -> OrderOut:
         customer_name=doc["customer_name"],
         customer_phone=doc["customer_phone"],
         customer_address=doc.get("customer_address", ""),
+        service_categories=doc.get("service_categories", []),
+        rack_number=doc.get("rack_number"),
         items=doc["items"],
         subtotal_paise=doc["subtotal_paise"],
         discount_paise=doc["discount_paise"],
         total_paise=doc["total_paise"],
-        paid_paise=doc["paid_paise"],
-        balance_paise=doc["total_paise"] - doc["paid_paise"],
+        paid_paise=doc.get("paid_paise", 0),
+        balance_paise=max(0, doc["total_paise"] - doc.get("paid_paise", 0)),
         payment_method=doc.get("payment_method", "cash"),
         status=doc["status"],
         note=doc.get("note", ""),
         created_at=doc.get("created_at"),
         ready_at=doc.get("ready_at"),
         collected_at=doc.get("collected_at"),
+        delivered_at=doc.get("delivered_at"),
         created_by_name=doc.get("created_by_name", ""),
     )
 
@@ -100,6 +106,11 @@ async def create_order(body: OrderCreateIn, user: dict = Depends(require_staff))
         bill = compute_bill(body.items, body.discount_paise, body.paid_paise)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+    if body.paid_paise > bill["total_paise"]:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Paid amount cannot exceed the order total",
+        )
 
     customer = await upsert_customer(body.customer)
     now = datetime.now(timezone.utc)
@@ -112,6 +123,8 @@ async def create_order(body: OrderCreateIn, user: dict = Depends(require_staff))
         "customer_name": customer["name"],
         "customer_phone": customer["phone"],
         "customer_address": customer.get("address", ""),
+        "service_categories": body.service_categories,
+        "rack_number": body.rack_number,
         **bill,
         "payment_method": body.payment_method,
         "status": "in_process",
@@ -127,9 +140,28 @@ async def create_order(body: OrderCreateIn, user: dict = Depends(require_staff))
     }
     try:
         res = await orders().insert_one(doc)
-    except Exception as exc:  # duplicate order_no on extreme contention
-        raise HTTPException(status.HTTP_409_CONFLICT, f"Could not allocate an order number: {exc}")
+    except DuplicateKeyError:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The order number was already used. Please try again.",
+        )
     doc["_id"] = res.inserted_id
+    if body.paid_paise > 0:
+        await payments().insert_one(
+            {
+                "payment_id": str(uuid4()),
+                "order_id": str(res.inserted_id),
+                "order_no": order_no,
+                "customer_id": str(customer["_id"]),
+                "amount_paise": body.paid_paise,
+                "payment_method": body.payment_method,
+                "payment_status": "recorded",
+                "transaction_reference": None,
+                "payment_date": now,
+                "recorded_by": str(user["_id"]),
+                "recorded_by_name": user["name"],
+            }
+        )
     return _order_out(doc)
 
 
@@ -164,6 +196,26 @@ async def list_orders(
     return OrderListOut(
         items=[_order_out(d) for d in docs], total=total, page=page, page_size=page_size
     )
+
+
+@router.get("/pending-payments", response_model=list[OrderOut])
+async def pending_payments(_: dict = Depends(require_staff)) -> list[OrderOut]:
+    cursor = (
+        orders()
+        .find(
+            {
+                "$expr": {
+                    "$lt": [
+                        {"$ifNull": ["$paid_paise", 0]},
+                        {"$ifNull": ["$total_paise", 0]},
+                    ]
+                }
+            }
+        )
+        .sort("created_at", -1)
+        .limit(5000)
+    )
+    return [_order_out(doc) async for doc in cursor]
 
 
 @router.get("/{order_id}", response_model=OrderOut)
@@ -209,6 +261,11 @@ async def update_status(
             status.HTTP_409_CONFLICT,
             f"Cannot move an order from {current['status']} to {body.status}",
         )
+    if body.status == "collected" and current.get("paid_paise", 0) < current["total_paise"]:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Complete the payment before collecting the order",
+        )
 
     now = datetime.now(timezone.utc)
     update: dict = {"status": body.status, "updated_at": now}
@@ -216,8 +273,8 @@ async def update_status(
         update["ready_at"] = now
     if body.status == "collected":
         update["collected_at"] = now
-        # Collection implies the customer took the clothes, so settle the balance.
-        update["paid_paise"] = current["total_paise"]
+    if body.status == "delivered":
+        update["delivered_at"] = now
 
     doc = await orders().find_one_and_update(
         {"_id": oid, "status": current["status"]},  # optimistic concurrency on status
@@ -232,28 +289,91 @@ async def update_status(
     return _order_out(doc)
 
 
-@router.patch("/{order_id}/payment", response_model=OrderOut)
-async def record_payment(
-    order_id: str, body: PaymentIn, _: dict = Depends(require_staff)
-) -> OrderOut:
+@router.post("/{order_id}/deliver", response_model=OrderOut)
+async def deliver_order(order_id: str, _: dict = Depends(require_staff)) -> OrderOut:
     oid = _oid(order_id)
     current = await orders().find_one({"_id": oid})
     if current is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
-    if body.paid_paise > current["total_paise"]:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Payment exceeds the bill total")
+    if current["status"] == "delivered":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This order has already been delivered")
+    if current["status"] != "ready":
+        raise HTTPException(status.HTTP_409_CONFLICT, "The order must be ready for pickup before delivery")
+    if current.get("paid_paise", 0) != current["total_paise"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Complete the payment before delivering the order")
 
+    now = datetime.now(timezone.utc)
     doc = await orders().find_one_and_update(
-        {"_id": oid},
+        {
+            "_id": oid,
+            "status": "ready",
+            "paid_paise": current["total_paise"],
+        },
+        {"$set": {"status": "delivered", "delivered_at": now, "updated_at": now}, "$inc": {"version": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Order changed meanwhile, please reload")
+    return _order_out(doc)
+
+
+@router.patch("/{order_id}/payment", response_model=OrderOut)
+async def record_payment(order_id: str, body: PaymentIn, user: dict = Depends(require_staff)) -> OrderOut:
+    oid = _oid(order_id)
+    current = await orders().find_one({"_id": oid})
+    if current is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    paid = current.get("paid_paise", 0)
+    if body.amount_paise > current["total_paise"] - paid:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Payment cannot exceed the outstanding balance",
+        )
+
+    now = datetime.now(timezone.utc)
+    payment_id = str(uuid4())
+    payment_doc = {
+        "payment_id": payment_id,
+        "order_id": str(oid),
+        "order_no": current["order_no"],
+        "customer_id": current["customer_id"],
+        "amount_paise": body.amount_paise,
+        "payment_method": body.payment_method,
+        "payment_status": "pending",
+        "transaction_reference": None,
+        "payment_date": now,
+        "recorded_by": str(user["_id"]),
+        "recorded_by_name": user["name"],
+    }
+    await payments().insert_one(payment_doc)
+    doc = await orders().find_one_and_update(
+        {
+            "_id": oid,
+            "paid_paise": paid,
+            "total_paise": {"$gte": paid + body.amount_paise},
+        },
         {
             "$set": {
-                "paid_paise": body.paid_paise,
-                "updated_at": datetime.now(timezone.utc),
-                "payment_method": "cash" if current.get("payment_method") == "unpaid" else current.get("payment_method"),
+                "paid_paise": paid + body.amount_paise,
+                "updated_at": now,
+                "payment_method": body.payment_method,
             },
             "$inc": {"version": 1},
         },
         return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        await payments().update_one(
+            {"payment_id": payment_id},
+            {"$set": {"payment_status": "rejected"}},
+        )
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The order balance changed. Reload the order and try again.",
+        )
+    await payments().update_one(
+        {"payment_id": payment_id},
+        {"$set": {"payment_status": "recorded"}},
     )
     return _order_out(doc)
 

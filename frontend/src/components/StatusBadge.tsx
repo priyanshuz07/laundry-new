@@ -6,6 +6,7 @@ const STYLES: Record<OrderStatus, string> = {
   done: 'bg-sky-100 text-sky-800 ring-1 ring-sky-200',
   ready: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200',
   collected: 'bg-slate-200 text-slate-700 ring-1 ring-slate-300',
+  delivered: 'bg-indigo-100 text-indigo-800 ring-1 ring-indigo-200',
 };
 
 export function StatusBadge({ status }: { status: OrderStatus }) {

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from .config import settings
 from .db import close, ensure_indexes, users
@@ -27,17 +28,22 @@ async def bootstrap_admin() -> None:
         log.warning("No admin exists and BOOTSTRAP_ADMIN_PASSWORD is unset - login is impossible")
         return
     now = datetime.now(timezone.utc)
-    await users().insert_one(
-        {
-            "name": "Owner",
-            "phone": settings.bootstrap_admin_phone,
-            "password_hash": hash_password(settings.bootstrap_admin_password),
-            "role": "admin",
-            "is_active": True,
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
+    try:
+        await users().insert_one(
+            {
+                "name": "Owner",
+                "phone": settings.bootstrap_admin_phone,
+                "password_hash": hash_password(settings.bootstrap_admin_password),
+                "role": "admin",
+                "is_active": True,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    except DuplicateKeyError:
+        if await users().find_one({"role": "admin"}, {"_id": 1}):
+            return
+        raise
     log.info("bootstrapped admin account for %s", settings.bootstrap_admin_phone)
 
 
@@ -115,3 +121,22 @@ async def health(response: Response) -> dict:
     if not db_ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {"status": "ok" if db_ok else "degraded", "database": db_ok, "version": "1.0.0"}
+
+
+@app.get("/api/db-test")
+async def database_test(response: Response) -> dict:
+    try:
+        await users().database.command("ping")
+    except PyMongoError as exc:
+        log.error("database test failed: %s", exc)
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {
+            "status": "error",
+            "message": "MongoDB connection failed",
+            "database": settings.mongodb_db,
+        }
+    return {
+        "status": "success",
+        "message": "MongoDB connected successfully",
+        "database": settings.mongodb_db,
+    }
