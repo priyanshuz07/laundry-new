@@ -1,5 +1,5 @@
 /** Typed REST client. One place that knows about tokens and errors. */
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8000';
+const BASE = (import.meta.env.VITE_API_URL ?? '').trim().replace(/\/+$/, '');
 
 export class ApiError extends Error {
   status: number;

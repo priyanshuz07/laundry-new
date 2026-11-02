@@ -5,7 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -41,8 +41,27 @@ async def bootstrap_admin() -> None:
     log.info("bootstrapped admin account for %s", settings.bootstrap_admin_phone)
 
 
+def validate_production_settings() -> None:
+    if settings.environment.lower() != "production":
+        return
+
+    if settings.jwt_secret.startswith("insecure-dev-secret") or len(settings.jwt_secret) < 32:
+        raise RuntimeError("Production requires a JWT_SECRET of at least 32 characters.")
+    if not settings.mongodb_uri.startswith(("mongodb://", "mongodb+srv://")):
+        raise RuntimeError("Production requires MONGODB_URI to be a MongoDB connection string.")
+    if "localhost" in settings.mongodb_uri or "127.0.0.1" in settings.mongodb_uri:
+        raise RuntimeError("Production MONGODB_URI must not point to localhost.")
+    if not settings.cors_origin_list or any(
+        origin == "*" or not origin.startswith("https://") for origin in settings.cors_origin_list
+    ):
+        raise RuntimeError("Production CORS_ORIGINS must contain explicit HTTPS frontend origins.")
+    if not settings.public_base_url.startswith("https://"):
+        raise RuntimeError("Production PUBLIC_BASE_URL must be the HTTPS frontend URL.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_production_settings()
     if settings.jwt_secret.startswith("insecure-dev-secret"):
         log.warning("JWT_SECRET is the development default - set a real secret before deploying")
     await ensure_indexes()
@@ -86,11 +105,13 @@ async def value_error_handler(_: Request, exc: ValueError) -> JSONResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict:
+async def health(response: Response) -> dict:
     try:
         await users().database.command("ping")
         db_ok = True
     except Exception as exc:  # noqa: BLE001 - report, do not crash the probe
         log.error("health check database ping failed: %s", exc)
         db_ok = False
+    if not db_ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {"status": "ok" if db_ok else "degraded", "database": db_ok, "version": "1.0.0"}

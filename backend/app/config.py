@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Laundry Management System"
+    environment: str = "development"
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db: str = "laundry"
     jwt_secret: str = "insecure-dev-secret-change-me"
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        return [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
 
 
 @lru_cache
