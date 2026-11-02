@@ -206,11 +206,15 @@ routes. The FastAPI backend is a separate Render web service defined in
 3. Import the repository in Vercel and set **Root Directory** to the repository
    root. The root `vercel.json` installs and builds in `frontend/` and serves
    `frontend/dist`; no separate Vercel project root is needed.
-4. Set the Vercel frontend build environment variable `VITE_API_URL` to the
-   Render backend's HTTPS origin (no trailing slash), then redeploy. The
-   frontend sends `/api` requests to that backend. If the Vercel domain
-   changes, update the backend's `PUBLIC_BASE_URL` and `CORS_ORIGINS` and
-   redeploy it; QR codes use `PUBLIC_BASE_URL`.
+4. In Vercel's **Environment Variables**, set `VITE_API_URL` for the frontend
+   build in Production and Preview to the Render backend's HTTPS origin, for
+   example `https://laundry-api.onrender.com` (no trailing slash and no `/api`
+   suffix). The frontend appends paths such as `/api/auth/login`. Redeploy
+   after adding or changing this variable; Vite embeds it at build time. The
+   production frontend reports a configuration error instead of sending API
+   requests to Vercel's SPA fallback when this variable is missing.
+   If the Vercel domain changes, update the backend's `PUBLIC_BASE_URL` and
+   `CORS_ORIGINS` and redeploy it; QR codes use `PUBLIC_BASE_URL`.
 5. Open `https://<your-backend>.onrender.com/api/health`; it should return
    `{"status":"ok","database":true,...}`.
 
@@ -220,8 +224,8 @@ routes. The FastAPI backend is a separate Render web service defined in
    **Staff** and **Reports** pages are admin-only. Create a sub-admin and verify
    it cannot access those pages or endpoints.
 2. Create an order, open its bill and QR code, scan the QR link, update order
-   status, search customers and load reports. Confirm browser `/api` requests
-   reach the configured Render backend and succeed.
+   status, search customers and load reports. Confirm browser requests to
+   `/api` reach the configured Render backend and succeed.
 
 **Serverless reminder note:** the backend starts an in-process APScheduler for
 WhatsApp reminders. Vercel Functions may scale to multiple instances or pause

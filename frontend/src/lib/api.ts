@@ -22,6 +22,13 @@ export function onUnauthorized(handler: () => void): void {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (import.meta.env.PROD && !BASE) {
+    throw new ApiError(
+      0,
+      'API is not configured. Set VITE_API_URL to the deployed backend origin and redeploy.',
+    );
+  }
+
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type') && init.body) headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
