@@ -189,11 +189,13 @@ the public `/api` path on the same origin, so no service binding is needed.
 
 1. Import the repository in Vercel and set **Root Directory** to the repository
    root, where `vercel.json` is located. Do not select only `frontend/` or
-   `backend/`; the root configuration builds both services.
-2. Deploy the project. Vercel builds `backend/` as FastAPI and `frontend/` as
-   Vite. The top-level rewrites send `/api/*` to the backend without stripping
-   `/api`; the frontend service rewrite supports refreshes on app routes such as
-   `/orders` and QR links such as `/o/<token>`.
+   `backend/`; doing so prevents Vercel from reading the multi-service
+   configuration.
+2. Deploy the project. The frontend service runs `npm run build` in `frontend/`
+   and serves `frontend/dist`. The backend service imports the FastAPI
+   application from `backend/app/main.py` (`app.main:app`). The top-level
+   rewrites send `/api/*` to the backend without stripping `/api`; the
+   frontend handles `/` and other non-API paths.
 3. In the Vercel project's environment settings, configure the backend service
    with:
    - `ENVIRONMENT=production`
