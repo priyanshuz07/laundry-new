@@ -166,90 +166,78 @@ increments, the status state machine, WhatsApp-on-ready, QR + public lookup priv
 sub-admin permission denial, immediate deactivation, duplicate phone rejection,
 customer reuse by phone, report aggregation, and reminder exactly-once behaviour.
 
-## 7. Production deployment (MongoDB Atlas, Render and Vercel)
+## 7. Production deployment (MongoDB Atlas and Vercel Services)
 
-The frontend and API deploy independently. There is no multi-service Vercel
-configuration; Vercel serves only `frontend/`, and Render serves only `backend/`.
+The root `vercel.json` deploys the existing frontend and FastAPI backend as
+separate services in one Vercel project, with a shared domain. `/api/*` routes
+to FastAPI and all other public paths route to the frontend. The browser calls
+the public `/api` path on the same origin, so no service binding is needed.
 
 ### A. Create a MongoDB Atlas database
 
 1. Create an Atlas project and cluster. Create a database user with a strong,
    unique password and read/write access only to the `laundry` database.
-2. In **Network Access**, allow the outbound IP addresses shown for your Render
-   service/region. If the selected Render plan does not provide fixed egress IPs,
-   use its supported static outbound IP option. Do not expose the database to
+2. In **Network Access**, allow the outbound IP addresses for the selected Vercel
+   deployment region/egress configuration. If needed, use a Vercel static
+   outbound IP option supported by your plan. Do not expose the database to
    `0.0.0.0/0`.
 3. Copy the Atlas `mongodb+srv://` connection string. Replace its username,
    password and database name with the database user's values and `laundry`.
-   Keep this value private; only the Render `MONGODB_URI` setting uses it.
+   Keep this value private; only the backend service needs `MONGODB_URI`.
 
-### B. Create the Vercel frontend project
+### B. Deploy both services to Vercel
 
-1. Import the repository in Vercel and set **Root Directory** to `frontend`.
-   Enable **Include source files outside of the Root Directory** only if Vercel
-   requests it; this app does not require shared files from the repository root.
-2. Select the **Vite** framework preset. Use build command `npm run build` and
-   output directory `dist` (the package defaults are also correct). Install with
-   `npm install`.
-3. Deploy once to obtain the production frontend origin, such as
-   `https://your-project.vercel.app`. Do not add a trailing slash when entering
-   it in backend settings.
-4. In **Settings → Environment Variables**, add `VITE_API_URL` with the Render
-   API origin (for example `https://laundry-api.onrender.com`, without `/api`
-   or a trailing slash). Redeploy after setting or changing this variable. It
-   is a public API endpoint, not a secret; do not put database credentials or
-   backend secrets in any `VITE_*` variable.
-5. The frontend Vercel config rewrites app routes to `index.html`, so refreshing
-   routes such as `/orders` and public QR links such as `/o/<token>` works.
-
-### C. Deploy the FastAPI backend to Render
-
-1. In Render, create a **Blueprint** from this repository and use `render.yaml`,
-   or create a Web Service manually with **Root Directory** `backend`,
-   **Build Command** `pip install -r requirements.txt`, and **Start Command**
-   `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
-2. Set these environment variables in Render (the Blueprint marks sensitive or
-   deployment-specific values for manual entry):
+1. Import the repository in Vercel and set **Root Directory** to the repository
+   root, where `vercel.json` is located. Do not select only `frontend/` or
+   `backend/`; the root configuration builds both services.
+2. Deploy the project. Vercel builds `backend/` as FastAPI and `frontend/` as
+   Vite. The top-level rewrites send `/api/*` to the backend without stripping
+   `/api`; the frontend service rewrite supports refreshes on app routes such as
+   `/orders` and QR links such as `/o/<token>`.
+3. In the Vercel project's environment settings, configure the backend service
+   with:
    - `ENVIRONMENT=production`
    - `MONGODB_URI` = the private Atlas URI from step A
    - `MONGODB_DB=laundry`
    - `JWT_SECRET` = a cryptographically random value of at least 32 characters
      (generate with `openssl rand -hex 32`)
-   - `PUBLIC_BASE_URL` = the exact Vercel production origin, e.g.
-     `https://your-project.vercel.app`
-   - `CORS_ORIGINS` = the same exact Vercel origin. Comma-separate any additional
-     trusted HTTPS frontend origins; do not use `*` or include trailing slashes.
+   - `PUBLIC_BASE_URL` = the Vercel production origin, e.g.
+     `https://your-project.vercel.app` (no trailing slash)
+   - `CORS_ORIGINS` = the same HTTPS Vercel origin. Do not use `*` or include a
+     trailing slash.
    - `BOOTSTRAP_ADMIN_PHONE` and a unique `BOOTSTRAP_ADMIN_PASSWORD` for the
      initial admin account.
-3. Optionally add `WHATSAPP_PROVIDER=meta`, `WHATSAPP_PHONE_ID` and
-   `WHATSAPP_TOKEN` if Meta WhatsApp delivery is configured. Otherwise keep
-   `WHATSAPP_PROVIDER=stub`.
-4. Deploy and wait for the `/api/health` check to pass. Once the first admin is
-   created, remove `BOOTSTRAP_ADMIN_PASSWORD` from Render and change the
-   password through the app. Existing users and database data are not reset by
-   deployment.
-5. If you change the Vercel domain, update both `PUBLIC_BASE_URL` and
-   `CORS_ORIGINS` in Render and redeploy. `PUBLIC_BASE_URL` controls the URL
-   embedded in generated order QR codes.
-
-Render's free instances may spin down while idle, pausing the in-process
-reminder scheduler. For reliable scheduled reminders, use a Render plan that
-keeps the web service running.
-
-### D. Verify the live app
-
-1. Open `https://<render-service>.onrender.com/api/health`; it should return
+4. Optionally configure `WHATSAPP_PROVIDER=meta`, `WHATSAPP_PHONE_ID` and
+   `WHATSAPP_TOKEN` on the backend service. Otherwise keep
+   `WHATSAPP_PROVIDER=stub`. Keep all backend secrets out of frontend variables
+   and source code.
+5. Leave `VITE_API_URL` unset for the frontend; the API client uses the
+   same-origin `/api` route. If you change the Vercel domain, update
+   `PUBLIC_BASE_URL` and `CORS_ORIGINS` and redeploy. The QR codes use
+   `PUBLIC_BASE_URL`.
+6. Wait for the Vercel deployment to complete, then open
+   `https://<your-project>.vercel.app/api/health`; it should return
    `{"status":"ok","database":true,...}`.
-2. Open the Vercel URL, sign in with the bootstrap admin, and confirm the
+
+### C. Verify the live app
+
+1. Open the Vercel URL, sign in with the bootstrap admin, and confirm the
    **Staff** and **Reports** pages are admin-only. Create a sub-admin and verify
    it cannot access those pages or endpoints.
-3. Create an order, open its bill and QR code, scan the QR link, update order
+2. Create an order, open its bill and QR code, scan the QR link, update order
    status, search customers and load reports. Confirm browser requests target
-   the Render API and succeed without CORS errors.
+   `/api` on the same Vercel domain and succeed.
+
+**Serverless reminder note:** the backend starts an in-process APScheduler for
+WhatsApp reminders. Vercel Functions may scale to multiple instances or pause
+between requests, so this scheduler is not a reliable production clock there.
+If scheduled reminders must run reliably, deploy the backend on an always-on
+service such as Render (using `render.yaml`) or move reminders to a dedicated
+external scheduler. Vercel's backend service can still serve the API.
 
 The backend validates the production JWT secret, MongoDB URI, HTTPS CORS origins
-and public frontend URL at startup. The database URI and all other backend
-secrets belong only in Render environment variables; never expose or commit them.
+and public frontend URL at startup. Database credentials and other backend
+secrets belong only in backend environment settings; never expose or commit them.
 
 ## 8. Before going live
 
