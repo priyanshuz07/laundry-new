@@ -30,9 +30,41 @@ async def test_db_test_reports_configured_database(client):
     assert response.status_code == 200
     assert response.json() == {
         "status": "success",
-        "message": "MongoDB connected successfully",
-        "database": "laundryDB",
+        "message": "MongoDB Atlas connected successfully",
     }
+
+
+async def test_db_test_rejects_non_atlas_configuration(client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mongodb_uri", "mongodb://localhost:27017/")
+    response = await client.get("/api/db-test")
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "error",
+        "message": "MongoDB Atlas is not configured",
+    }
+
+
+async def test_db_test_hides_connection_error_details(client, monkeypatch):
+    from app import main
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    class UnavailableDatabase:
+        async def command(self, command):
+            raise ServerSelectionTimeoutError("connection detail must not be returned")
+
+    class UnavailableCollection:
+        database = UnavailableDatabase()
+
+    monkeypatch.setattr(main, "users", lambda: UnavailableCollection())
+    response = await client.get("/api/db-test")
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "error",
+        "message": "MongoDB Atlas connection failed",
+    }
+    assert "connection detail" not in response.text
 
 
 async def test_login_rejects_bad_password(client):
@@ -258,6 +290,58 @@ async def test_customer_reuse_by_phone(client, admin_token):
     customers = (await client.get("/api/customers", headers=h)).json()
     assert len(customers) == 1
     assert customers[0]["order_count"] == 2
+
+
+async def test_customer_crud_and_delete_protection(client, admin_token):
+    headers = auth(admin_token)
+    created = await client.post(
+        "/api/customers",
+        json={"name": "Customer One", "phone": "9123456789", "address": "Old address"},
+        headers=headers,
+    )
+    assert created.status_code == 201
+    customer_id = created.json()["id"]
+
+    fetched = await client.get(f"/api/customers/{customer_id}", headers=headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["name"] == "Customer One"
+
+    updated = await client.put(
+        f"/api/customers/{customer_id}",
+        json={"name": "Customer Updated", "phone": "9123456789", "address": "New address"},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["address"] == "New address"
+
+    deleted = await client.delete(f"/api/customers/{customer_id}", headers=headers)
+    assert deleted.status_code == 204
+    assert (await client.get(f"/api/customers/{customer_id}", headers=headers)).status_code == 404
+
+    order = (await client.post("/api/orders", json=ORDER, headers=headers)).json()
+    protected = await client.delete(f"/api/customers/{order['customer_id']}", headers=headers)
+    assert protected.status_code == 409
+
+
+async def test_reminder_cron_requires_secret(client, monkeypatch):
+    from app import main
+    from app.config import settings
+
+    async def send_reminders():
+        return 2
+
+    monkeypatch.setattr(settings, "cron_secret", "test-cron-secret")
+    monkeypatch.setattr(main, "send_due_reminders", send_reminders)
+
+    unauthorized = await client.get("/api/cron/reminders")
+    assert unauthorized.status_code == 401
+
+    authorized = await client.get(
+        "/api/cron/reminders",
+        headers={"Authorization": "Bearer test-cron-secret"},
+    )
+    assert authorized.status_code == 200
+    assert authorized.json() == {"sent": 2}
 
 
 async def test_reports_aggregate_revenue(client, admin_token):

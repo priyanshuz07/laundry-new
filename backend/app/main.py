@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymongo.errors import DuplicateKeyError, PyMongoError
@@ -14,7 +16,7 @@ from .config import settings
 from .db import close, ensure_indexes, users
 from .routers import auth, customers, orders, public, reports, users as users_router
 from .security import hash_password
-from .services.reminders import start_scheduler, stop_scheduler
+from .services.reminders import send_due_reminders, start_scheduler, stop_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("lms")
@@ -48,15 +50,12 @@ async def bootstrap_admin() -> None:
 
 
 def validate_production_settings() -> None:
+    settings.validate_database_settings()
     if settings.environment.lower() != "production":
         return
 
     if settings.jwt_secret.startswith("insecure-dev-secret") or len(settings.jwt_secret) < 32:
         raise RuntimeError("Production requires a JWT_SECRET of at least 32 characters.")
-    if not settings.mongodb_uri.startswith(("mongodb://", "mongodb+srv://")):
-        raise RuntimeError("Production requires MONGODB_URI to be a MongoDB connection string.")
-    if "localhost" in settings.mongodb_uri or "127.0.0.1" in settings.mongodb_uri:
-        raise RuntimeError("Production MONGODB_URI must not point to localhost.")
     if not settings.cors_origin_list or any(
         origin == "*" or not origin.startswith("https://") for origin in settings.cors_origin_list
     ):
@@ -72,7 +71,10 @@ async def lifespan(app: FastAPI):
         log.warning("JWT_SECRET is the development default - set a real secret before deploying")
     await ensure_indexes()
     await bootstrap_admin()
-    start_scheduler()
+    if os.getenv("VERCEL") == "1":
+        log.info("reminder scheduler disabled on Vercel; Vercel Cron invokes it")
+    else:
+        start_scheduler()
     log.info("%s started", settings.app_name)
     try:
         yield
@@ -115,8 +117,8 @@ async def health(response: Response) -> dict:
     try:
         await users().database.command("ping")
         db_ok = True
-    except Exception as exc:  # noqa: BLE001 - report, do not crash the probe
-        log.error("health check database ping failed: %s", exc)
+    except (PyMongoError, RuntimeError) as exc:
+        log.error("health check database ping failed (%s)", type(exc).__name__)
         db_ok = False
     if not db_ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -126,17 +128,30 @@ async def health(response: Response) -> dict:
 @app.get("/api/db-test")
 async def database_test(response: Response) -> dict:
     try:
+        settings.validate_database_settings()
         await users().database.command("ping")
     except PyMongoError as exc:
-        log.error("database test failed: %s", exc)
+        log.error("Atlas database test failed (%s)", type(exc).__name__)
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {
-            "status": "error",
-            "message": "MongoDB connection failed",
-            "database": settings.mongodb_db,
-        }
+        return {"status": "error", "message": "MongoDB Atlas connection failed"}
+    except RuntimeError as exc:
+        log.error("Atlas database configuration invalid: %s", exc)
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "error", "message": "MongoDB Atlas is not configured"}
     return {
         "status": "success",
-        "message": "MongoDB connected successfully",
-        "database": settings.mongodb_db,
+        "message": "MongoDB Atlas connected successfully",
     }
+
+
+@app.get("/api/cron/reminders", include_in_schema=False)
+async def scheduled_reminders(request: Request) -> dict[str, int]:
+    if not settings.cron_secret:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "CRON_SECRET is not configured",
+        )
+    expected = f"Bearer {settings.cron_secret}"
+    if not secrets.compare_digest(request.headers.get("authorization", ""), expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid cron authorization")
+    return {"sent": await send_due_reminders()}

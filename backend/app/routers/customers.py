@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pymongo import ReturnDocument
 
 from ..db import customers, orders
@@ -136,3 +136,22 @@ async def update_customer(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Customer not found")
     count = await orders().count_documents({"customer_id": customer_id})
     return _out(res, count)
+
+
+@router.delete("/{customer_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_customer(customer_id: str, _: dict = Depends(require_staff)) -> Response:
+    try:
+        oid = ObjectId(customer_id)
+    except InvalidId:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid id")
+
+    customer_id = str(oid)
+    if await orders().find_one({"customer_id": customer_id}, {"_id": 1}):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Customers with orders cannot be deleted",
+        )
+    result = await customers().delete_one({"_id": oid})
+    if result.deleted_count == 0:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Customer not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

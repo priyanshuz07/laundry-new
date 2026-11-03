@@ -281,6 +281,20 @@ export const api = {
     return request('/api/customers', { method: 'POST', body: JSON.stringify(input) });
   },
 
+  updateCustomer(
+    customerId: string,
+    input: { name: string; phone: string; address: string; notes: string },
+  ): Promise<Customer> {
+    return request(`/api/customers/${encodeURIComponent(customerId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteCustomer(customerId: string): Promise<void> {
+    return request(`/api/customers/${encodeURIComponent(customerId)}`, { method: 'DELETE' });
+  },
+
   users(): Promise<StaffUser[]> {
     return request('/api/users');
   },

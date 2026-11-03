@@ -8,7 +8,8 @@ export function Customers() {
   const [term, setTerm] = useState('');
   const [debounced, setDebounced] = useState('');
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', phone: '', address: '' });
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState({ name: '', phone: '', address: '', notes: '' });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -19,20 +20,68 @@ export function Customers() {
 
   const { data, error: loadError, loading, reload } = useApi(() => api.customers(debounced), [debounced]);
 
+  function startCreate() {
+    setEditingId(null);
+    setForm({ name: '', phone: '', address: '', notes: '' });
+    setError(null);
+    setOpen(true);
+  }
+
+  function startEdit(customer: NonNullable<typeof data>[number]) {
+    setEditingId(customer.id);
+    setForm({
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      notes: customer.notes,
+    });
+    setError(null);
+    setOpen(true);
+  }
+
+  function cancelForm() {
+    setEditingId(null);
+    setForm({ name: '', phone: '', address: '', notes: '' });
+    setError(null);
+    setOpen(false);
+  }
+
   async function save() {
     setError(null);
-    if (!form.name.trim() || form.phone.trim().length < 10) {
+    if (!form.name.trim()) {
       setError(t('requiredFields'));
+      return;
+    }
+    if (form.phone.trim().length !== 10) {
+      setError(t('phoneDigitsError'));
       return;
     }
     setBusy(true);
     try {
-      await api.saveCustomer({ ...form, notes: '' });
-      setForm({ name: '', phone: '', address: '' });
-      setOpen(false);
+      if (editingId) {
+        await api.updateCustomer(editingId, form);
+      } else {
+        await api.saveCustomer(form);
+      }
+      cancelForm();
       reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save the customer');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeCustomer(customerId: string) {
+    if (!window.confirm(t('confirmDeleteCustomer'))) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.deleteCustomer(customerId);
+      if (editingId === customerId) cancelForm();
+      reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete the customer');
     } finally {
       setBusy(false);
     }
@@ -45,7 +94,12 @@ export function Customers() {
           <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-brand-700">People</p>
           <h1 className="page-title">{t('customers')}</h1>
         </div>
-        <button type="button" className="btn-primary px-3 py-2.5 text-sm" onClick={() => setOpen((v) => !v)}>
+        <button
+          type="button"
+          className="btn-primary px-3 py-2.5 text-sm"
+          onClick={open ? cancelForm : startCreate}
+          disabled={busy}
+        >
           + {t('save')}
         </button>
       </div>
@@ -60,6 +114,8 @@ export function Customers() {
         />
       </div>
 
+      {error && <div className="card text-sm text-red-700">{error}</div>}
+
       {open && (
         <div className="card space-y-3">
           <div>
@@ -73,17 +129,21 @@ export function Customers() {
               inputMode="numeric"
               value={form.phone}
               onChange={(e) => setForm({ ...form, phone: e.target.value.replace(/[^0-9]/g, '') })}
-              maxLength={15}
+              maxLength={10}
             />
           </div>
           <div>
             <label className="label">{t('address')}</label>
             <input className="field" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
           </div>
-          {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-          <button type="button" className="btn-primary w-full" onClick={save} disabled={busy}>
-            {busy ? t('saving') : t('save')}
-          </button>
+          <div className="flex gap-2">
+            <button type="button" className="btn-primary flex-1" onClick={save} disabled={busy}>
+              {busy ? t('saving') : editingId ? t('saveChanges') : t('save')}
+            </button>
+            <button type="button" className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-700" onClick={cancelForm} disabled={busy}>
+              {t('cancel')}
+            </button>
+          </div>
         </div>
       )}
 
@@ -107,6 +167,24 @@ export function Customers() {
             <span className="pill bg-slate-100 text-slate-600">
               {c.order_count} {t('totalOrders')}
             </span>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                onClick={() => startEdit(c)}
+                disabled={busy}
+              >
+                {t('edit')}
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-rose-200 px-3 py-1.5 text-sm text-rose-700 hover:bg-rose-50"
+                onClick={() => removeCustomer(c.id)}
+                disabled={busy}
+              >
+                {t('remove')}
+              </button>
+            </div>
           </li>
         ))}
       </ul>

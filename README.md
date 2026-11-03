@@ -2,29 +2,33 @@
 
 A React/Vite frontend with an existing FastAPI backend for customers, orders,
 bills, QR lookups, staff management, payments, and reports. The backend stores
-application data in MongoDB; it connects to the local `laundryDB` database by
-default.
+application data in MongoDB Atlas.
 
 ## Local development with MongoDB
 
-1. Start MongoDB Community Server. In MongoDB Compass, connect to:
-   `mongodb://localhost:27017/`
-2. Configure and run the FastAPI backend in PowerShell:
+1. Copy `backend\.env.example` to `backend\.env` if needed. Set `MONGODB_URI`
+   to your actual Atlas connection string and `DB_NAME=laundryDB`. The backend
+   rejects local/non-SRV MongoDB URIs. URL-encode special characters in the
+   Atlas username or password. Set a private random `JWT_SECRET` and a private
+   `BOOTSTRAP_ADMIN_PASSWORD`.
 
    ```powershell
    if (!(Test-Path backend\.env)) { Copy-Item backend\.env.example backend\.env }
+   ```
+
+2. Configure and run the FastAPI backend in PowerShell:
+
+   ```powershell
    cd backend
    py -3.12 -m venv .venv
    .\.venv\Scripts\Activate.ps1
    pip install -r requirements.txt
    uvicorn app.main:app --reload
    ```
-
    Use Python 3.12 for the pinned backend dependencies. The backend loads
-   `backend\.env` with `python-dotenv`; its MongoDB settings use
-   `MONGODB_URL` and `DB_NAME=laundryDB`. Set a private random
-   `JWT_SECRET` in `backend\.env`. If `BOOTSTRAP_ADMIN_PASSWORD` is left blank,
-   and there is no existing Main Admin, login remains unavailable. Set a private
+   `backend\.env` with `python-dotenv`; its MongoDB settings use `MONGODB_URI`
+   and `DB_NAME`. If `BOOTSTRAP_ADMIN_PASSWORD` is left blank and there is no
+   existing Main Admin, login remains unavailable. Set a private
    `BOOTSTRAP_ADMIN_PASSWORD` and restart FastAPI to create the initial Main
    Admin, then sign in with `BOOTSTRAP_ADMIN_PHONE`. The login page does not
    expose public registration. A first-admin-only registration endpoint remains
@@ -38,17 +42,16 @@ default.
    npm run dev
    ```
 
-   Open the Vite URL (normally `http://127.0.0.1:5173`). The frontend calls the
-   backend at `http://127.0.0.1:8000`; `/api/health` and `/api/db-test` report
-   whether MongoDB is reachable.
-4. In Compass, open `laundryDB`. The app uses `users`, `orders`, and `payment`.
-   The existing customer directory and backend services also use `customers`,
-   `counters`, and `whatsapp_outbox`. The backend creates indexes on startup.
+   Open the Vite URL (normally `http://127.0.0.1:5173`). Set
+   `VITE_API_BASE_URL=http://127.0.0.1:8000` in `frontend\.env`; `/api/health`
+   and `/api/db-test` report whether MongoDB is reachable.
+4. The app uses `users`, `orders`, `payment`, `customers`, `counters`, and
+   `whatsapp_outbox` collections. The backend creates indexes on startup.
 
-The backend reuses its existing asynchronous Motor client, backed by the
-PyMongo driver, to avoid blocking FastAPI request handling. Both `pymongo` and
-`python-dotenv` are backend dependencies. `.env` files are ignored by Git. Never put MongoDB credentials,
-JWT secrets, or payment credentials in frontend environment variables.
+The backend reuses one asynchronous PyMongo client to avoid blocking FastAPI
+request handling. `.env` files are ignored by Git. Never put MongoDB
+credentials, JWT secrets, or payment credentials in frontend environment
+variables.
 
 ## Accounts and access
 
@@ -68,16 +71,46 @@ JWT secrets, or payment credentials in frontend environment variables.
   MongoDB. Existing MongoDB documents remain in place; older orders without
   service/rack fields remain readable.
 
-## Deployment limitation
+## Vercel deployment
 
-`mongodb://localhost:27017/` is for local development only. A frontend hosted
-on Vercel cannot connect to MongoDB running on the developer's computer. For a
-deployed app, host the FastAPI backend and MongoDB on reachable infrastructure,
-configure backend CORS and secrets there, and set the frontend build variable
-`VITE_API_BASE_URL` to the backend's public HTTPS URL. Do not expose a database
-URI or database credentials to the browser. The existing Vercel static
-configuration deploys only the frontend; it does not deploy this FastAPI
-backend or provide access to local MongoDB.
+Deploy the existing repository as two Vercel projects:
+
+1. **Frontend:** use the repository root as the project root (the existing
+   root `vercel.json` builds the Vite app). Add the production environment
+   variable `VITE_API_BASE_URL` with the backend's public HTTPS URL, then
+   redeploy.
+2. **Backend:** create another Vercel project from the same repository and set
+   its Root Directory to `backend`. Vercel discovers the FastAPI app at
+   `app/main.py`; `backend/vercel.json` also configures the reminder cron job.
+   Add these environment variables to the backend Vercel project for every
+   environment you deploy:
+
+   - `MONGODB_URI`: Atlas connection string (`mongodb+srv://...`). URL-encode
+     special characters in the database username and password.
+   - `DB_NAME`: Atlas database name, for example `laundryDB`.
+   - `ENVIRONMENT=production`
+   - `JWT_SECRET`: a private random value of at least 32 characters.
+   - `CORS_ORIGINS`: comma-separated, explicit HTTPS frontend origins.
+   - `PUBLIC_BASE_URL`: the frontend's HTTPS URL.
+   - `BOOTSTRAP_ADMIN_PHONE` and `BOOTSTRAP_ADMIN_PASSWORD`: initial admin
+     credentials. Set the password only for first startup; clear it after an
+     admin has been created.
+   - `CRON_SECRET`: a private random value used to authorize the scheduled
+     reminder route.
+   - Optional WhatsApp provider settings if actual WhatsApp delivery is
+     configured.
+
+Configure Atlas Network Access to allow the backend's outbound connections.
+Prefer a Vercel static egress option where available; do not make the cluster
+publicly reachable just to bypass the allowlist. The backend reuses its client
+between warm function invocations. Reminder delivery is invoked by Vercel Cron
+hourly in production; the in-process scheduler remains enabled for local and
+long-running deployments. Vercel environment variables are not inherited from
+local `.env` files. MongoDB credentials remain backend-only.
+
+The connection pool uses the driver's defaults because expected concurrency is
+unknown. Monitor Atlas connection counts alongside Vercel function concurrency
+and latency before changing pool or timeout settings.
 
 ## Validation
 
@@ -88,6 +121,26 @@ npm run build
 
 cd ..\backend
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 py -3.12 -m pytest
 ```
+
+`GET /api/db-test` only returns success after pinging the configured Atlas
+cluster. Test API workflows with the in-memory test database:
+
+```powershell
+cd backend
+py -3.12 -m pytest
+```
+
+These tests validate endpoint behavior but do not verify Atlas credentials or
+Atlas network access. Verify actual Atlas connectivity separately with:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/db-test
+```
+
+For CRUD verification, sign in through `/api/auth/login` to obtain a bearer
+token, then use the existing `/api/customers` POST and GET routes, PUT
+`/api/customers/{id}`, and DELETE `/api/customers/{id}`. Customers with orders
+cannot be deleted. Confirm the document in Atlas Data Explorer after creating
+it; it should remain after restarting FastAPI.

@@ -10,6 +10,8 @@ os.environ.setdefault("BOOTSTRAP_ADMIN_PHONE", "9000000001")
 os.environ.setdefault("BOOTSTRAP_ADMIN_PASSWORD", "AdminPass123")
 os.environ.setdefault("WHATSAPP_PROVIDER", "stub")
 os.environ.setdefault("PUBLIC_BASE_URL", "http://testserver")
+os.environ["MONGODB_URI"] = "mongodb+srv://test-user:test-password@cluster0.example.mongodb.net/"
+os.environ["DB_NAME"] = "laundryDB"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

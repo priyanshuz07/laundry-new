@@ -1,18 +1,19 @@
-"""MongoDB (Motor) client, index management and collection accessors."""
+"""Reusable asynchronous PyMongo client, index management and collection accessors."""
 from __future__ import annotations
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from pymongo import ASCENDING, DESCENDING, IndexModel
+from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, IndexModel
+from pymongo.asynchronous.database import AsyncDatabase
 
 from .config import settings
 
-_client: AsyncIOMotorClient | None = None
+_client: AsyncMongoClient | None = None
 
 
-def connect() -> AsyncIOMotorDatabase:
+def connect() -> AsyncDatabase:
     global _client
     if _client is None:
-        _client = AsyncIOMotorClient(
+        settings.validate_database_settings()
+        _client = AsyncMongoClient(
             settings.mongodb_uri,
             tz_aware=True,
             serverSelectionTimeoutMS=8000,
@@ -22,7 +23,7 @@ def connect() -> AsyncIOMotorDatabase:
     return _client[settings.mongodb_db]
 
 
-def client() -> AsyncIOMotorClient:
+def client() -> AsyncMongoClient:
     connect()
     assert _client is not None
     return _client
@@ -31,11 +32,11 @@ def client() -> AsyncIOMotorClient:
 async def close() -> None:
     global _client
     if _client is not None:
-        _client.close()
+        await _client.close()
         _client = None
 
 
-def db() -> AsyncIOMotorDatabase:
+def db() -> AsyncDatabase:
     return connect()
 
 
