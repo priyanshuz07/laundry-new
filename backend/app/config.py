@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     app_name: str = "Laundry Management System"
     environment: str = "development"
     mongodb_uri: str = Field(validation_alias="MONGODB_URI", repr=False)
-    mongodb_db: str = Field(validation_alias="DB_NAME")
+    mongodb_db: str = Field(validation_alias=AliasChoices("MONGODB_DB", "DB_NAME"))
     jwt_secret: str = "insecure-dev-secret-change-me"
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 480
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
         ):
             raise RuntimeError("MONGODB_URI still contains an unconfigured placeholder.")
         if not self.mongodb_db.strip():
-            raise RuntimeError("DB_NAME must be configured.")
+            raise RuntimeError("MONGODB_DB must be configured.")
 
 
 @lru_cache

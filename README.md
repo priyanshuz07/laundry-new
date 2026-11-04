@@ -7,7 +7,7 @@ application data in MongoDB Atlas.
 ## Local development with MongoDB
 
 1. Copy `backend\.env.example` to `backend\.env` if needed. Set `MONGODB_URI`
-   to your actual Atlas connection string and `DB_NAME=laundryDB`. The backend
+   to your actual Atlas connection string and `MONGODB_DB=laundryDB`. The backend
    rejects local/non-SRV MongoDB URIs. URL-encode special characters in the
    Atlas username or password. Set a private random `JWT_SECRET` and a private
    `BOOTSTRAP_ADMIN_PASSWORD`.
@@ -27,7 +27,8 @@ application data in MongoDB Atlas.
    ```
    Use Python 3.12 for the pinned backend dependencies. The backend loads
    `backend\.env` with `python-dotenv`; its MongoDB settings use `MONGODB_URI`
-   and `DB_NAME`. If `BOOTSTRAP_ADMIN_PASSWORD` is left blank and there is no
+   and `MONGODB_DB` (legacy `DB_NAME` is also accepted). If
+   `BOOTSTRAP_ADMIN_PASSWORD` is left blank and there is no
    existing Main Admin, login remains unavailable. Set a private
    `BOOTSTRAP_ADMIN_PASSWORD` and restart FastAPI to create the initial Main
    Admin, then sign in with `BOOTSTRAP_ADMIN_PHONE`. The login page does not
@@ -43,8 +44,9 @@ application data in MongoDB Atlas.
    ```
 
    Open the Vite URL (normally `http://127.0.0.1:5173`). Set
-   `VITE_API_BASE_URL=http://127.0.0.1:8000` in `frontend\.env`; `/api/health`
-   and `/api/db-test` report whether MongoDB is reachable.
+   `VITE_API_BASE_URL=http://127.0.0.1:8000` in `frontend\.env`; the frontend
+   reads `VITE_API_BASE_URL` (not `VITE_API_URL`). `/api/health` and
+   `/api/db-test` report whether MongoDB is reachable.
 4. The app uses `users`, `orders`, `payment`, `customers`, `counters`, and
    `whatsapp_outbox` collections. The backend creates indexes on startup.
 
@@ -71,46 +73,43 @@ variables.
   MongoDB. Existing MongoDB documents remain in place; older orders without
   service/rack fields remain readable.
 
-## Vercel deployment
+## Deployment
 
-Deploy the existing repository as two Vercel projects:
+Deploy the frontend to Vercel and the backend to a Hugging Face Docker Space:
 
-1. **Frontend:** use the repository root as the project root (the existing
-   root `vercel.json` builds the Vite app). Add the production environment
-   variable `VITE_API_BASE_URL` with the backend's public HTTPS URL, then
-   redeploy.
-2. **Backend:** create another Vercel project from the same repository and set
-   its Root Directory to `backend`. Vercel discovers the FastAPI app at
-   `app/main.py`; `backend/vercel.json` also configures the reminder cron job.
-   Add these environment variables to the backend Vercel project for every
-   environment you deploy:
+1. **Frontend:** deploy the Vite app to Vercel. Set `VITE_API_BASE_URL` to the
+   backend Space's public HTTPS URL and redeploy.
+2. **Backend:** create a Docker Space and upload the contents of `backend/` as
+   its repository root. The Space uses `backend/Dockerfile` and
+   `backend/README.md` to build and serve FastAPI on port `7860`. Add these
+   Space variables and secrets:
 
    - `MONGODB_URI`: Atlas connection string (`mongodb+srv://...`). URL-encode
      special characters in the database username and password.
-   - `DB_NAME`: Atlas database name, for example `laundryDB`.
+   - `MONGODB_DB`: Atlas database name, for example `laundryDB`.
    - `ENVIRONMENT=production`
    - `JWT_SECRET`: a private random value of at least 32 characters.
-   - `CORS_ORIGINS`: comma-separated, explicit HTTPS frontend origins.
+   - `CORS_ORIGINS`: comma-separated, explicit HTTPS Vercel frontend origins.
    - `PUBLIC_BASE_URL`: the frontend's HTTPS URL.
    - `BOOTSTRAP_ADMIN_PHONE` and `BOOTSTRAP_ADMIN_PASSWORD`: initial admin
      credentials. Set the password only for first startup; clear it after an
      admin has been created.
    - `CRON_SECRET`: a private random value used to authorize the scheduled
      reminder route.
-   - Optional WhatsApp provider settings if actual WhatsApp delivery is
-     configured.
+   - Optional `WHATSAPP_PROVIDER`, `WHATSAPP_PHONE_ID`, and `WHATSAPP_TOKEN`
+     only if actual WhatsApp delivery is configured.
 
-Configure Atlas Network Access to allow the backend's outbound connections.
-Prefer a Vercel static egress option where available; do not make the cluster
-publicly reachable just to bypass the allowlist. The backend reuses its client
-between warm function invocations. Reminder delivery is invoked by Vercel Cron
-hourly in production; the in-process scheduler remains enabled for local and
-long-running deployments. Vercel environment variables are not inherited from
-local `.env` files. MongoDB credentials remain backend-only.
+Configure Atlas Network Access to allow the Space's outbound connections.
+Hugging Face Spaces may use changing outbound IPs, so configure an appropriate
+Atlas network access policy for your deployment rather than exposing database
+credentials to the frontend. The backend reuses one asynchronous MongoDB client
+for its lifetime and closes it at shutdown. The in-process reminder scheduler
+runs in the Space. Vercel and Hugging Face environment variables are not
+inherited from local `.env` files. MongoDB credentials remain backend-only.
 
 The connection pool uses the driver's defaults because expected concurrency is
-unknown. Monitor Atlas connection counts alongside Vercel function concurrency
-and latency before changing pool or timeout settings.
+unknown. Monitor Atlas connection counts alongside Space concurrency and API
+latency before changing pool or timeout settings.
 
 ## Validation
 
